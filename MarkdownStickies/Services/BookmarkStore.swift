@@ -4,6 +4,7 @@ import AppKit
 struct ScanRoot: Identifiable, Hashable, Sendable {
     var id: String { path.path }
     let path: URL
+    var isSynced: Bool
 }
 
 @MainActor
@@ -11,6 +12,7 @@ final class BookmarkStore: ObservableObject {
     @Published private(set) var roots: [ScanRoot] = []
 
     private let pathsKey = "scanRootPaths"
+    private let syncedPathsKey = "syncedScanRootPaths"
     private let legacyBookmarksKey = "scanRootBookmarks"
     private let didMigrateKey = "didMigrateScanRootsFromSandbox"
 
@@ -20,15 +22,19 @@ final class BookmarkStore: ObservableObject {
 
     func load() {
         roots = []
+        let synced = Set(UserDefaults.standard.array(forKey: syncedPathsKey) as? [String] ?? [])
 
         if UserDefaults.standard.object(forKey: pathsKey) != nil {
             // Key exists (even as []) — user choice wins; do not re-migrate.
             let paths = UserDefaults.standard.array(forKey: pathsKey) as? [String] ?? []
             roots = paths
-                .map { ScanRoot(path: URL(fileURLWithPath: $0).standardizedFileURL) }
+                .map { path -> ScanRoot in
+                    let url = URL(fileURLWithPath: path).standardizedFileURL
+                    return ScanRoot(path: url, isSynced: synced.contains(url.path))
+                }
                 .filter { FileManager.default.fileExists(atPath: $0.path.path) }
         } else if !UserDefaults.standard.bool(forKey: didMigrateKey) {
-            migrateLegacyOnce()
+            migrateLegacyOnce(synced: synced)
         }
 
         UserDefaults.standard.set(true, forKey: didMigrateKey)
@@ -36,18 +42,18 @@ final class BookmarkStore: ObservableObject {
         persist()
     }
 
-    private func migrateLegacyOnce() {
+    private func migrateLegacyOnce(synced: Set<String>) {
         if let stored = UserDefaults.standard.array(forKey: legacyBookmarksKey) as? [Data] {
-            roots = resolveBookmarkDataList(stored)
+            roots = resolveBookmarkDataList(stored, synced: synced)
             UserDefaults.standard.removeObject(forKey: legacyBookmarksKey)
         }
         if roots.isEmpty {
-            migrateFromSandboxContainerPrefs()
+            migrateFromSandboxContainerPrefs(synced: synced)
         }
         persist()
     }
 
-    private func resolveBookmarkDataList(_ stored: [Data]) -> [ScanRoot] {
+    private func resolveBookmarkDataList(_ stored: [Data], synced: Set<String>) -> [ScanRoot] {
         var migrated: [ScanRoot] = []
         for data in stored {
             var isStale = false
@@ -57,20 +63,22 @@ final class BookmarkStore: ObservableObject {
                 relativeTo: nil,
                 bookmarkDataIsStale: &isStale
             ) {
-                migrated.append(ScanRoot(path: url.standardizedFileURL))
+                let standardized = url.standardizedFileURL
+                migrated.append(ScanRoot(path: standardized, isSynced: synced.contains(standardized.path)))
             } else if let url = try? URL(
                 resolvingBookmarkData: data,
                 options: [.withSecurityScope],
                 relativeTo: nil,
                 bookmarkDataIsStale: &isStale
             ) {
-                migrated.append(ScanRoot(path: url.standardizedFileURL))
+                let standardized = url.standardizedFileURL
+                migrated.append(ScanRoot(path: standardized, isSynced: synced.contains(standardized.path)))
             }
         }
         return migrated
     }
 
-    private func migrateFromSandboxContainerPrefs() {
+    private func migrateFromSandboxContainerPrefs(synced: Set<String>) {
         let legacyPlist = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(
                 "Library/Containers/com.markdownstickies.app/Data/Library/Preferences/com.markdownstickies.app.plist"
@@ -79,10 +87,13 @@ final class BookmarkStore: ObservableObject {
 
         if let paths = dict[pathsKey] as? [String] {
             roots = paths
-                .map { ScanRoot(path: URL(fileURLWithPath: $0).standardizedFileURL) }
+                .map { path -> ScanRoot in
+                    let url = URL(fileURLWithPath: path).standardizedFileURL
+                    return ScanRoot(path: url, isSynced: synced.contains(url.path))
+                }
                 .filter { FileManager.default.fileExists(atPath: $0.path.path) }
         } else if let bookmarks = dict[legacyBookmarksKey] as? [Data] {
-            roots = resolveBookmarkDataList(bookmarks)
+            roots = resolveBookmarkDataList(bookmarks, synced: synced)
         }
     }
 
@@ -107,7 +118,7 @@ final class BookmarkStore: ObservableObject {
         if covers(standardized) {
             return false
         }
-        roots.append(ScanRoot(path: standardized))
+        roots.append(ScanRoot(path: standardized, isSynced: false))
         roots.sort { $0.path.path.localizedCaseInsensitiveCompare($1.path.path) == .orderedAscending }
         persist()
         return true
@@ -140,6 +151,22 @@ final class BookmarkStore: ObservableObject {
         }
     }
 
+    /// Scan roots flagged for LAN sync.
+    func syncedURLs() -> [URL] {
+        let synced = roots.filter(\.isSynced).map(\.path.standardizedFileURL)
+        return synced.filter { url in
+            !synced.contains { other in
+                other.path != url.path && url.path.hasPrefix(other.path + "/")
+            }
+        }
+    }
+
+    func setSynced(_ root: ScanRoot, enabled: Bool) {
+        guard let index = roots.firstIndex(where: { $0.id == root.id }) else { return }
+        roots[index].isSynced = enabled
+        persist()
+    }
+
     func remove(_ root: ScanRoot) {
         roots.removeAll { $0.id == root.id }
         persist()
@@ -151,5 +178,9 @@ final class BookmarkStore: ObservableObject {
 
     private func persist() {
         UserDefaults.standard.set(roots.map(\.path.path), forKey: pathsKey)
+        UserDefaults.standard.set(
+            roots.filter(\.isSynced).map(\.path.path),
+            forKey: syncedPathsKey
+        )
     }
 }

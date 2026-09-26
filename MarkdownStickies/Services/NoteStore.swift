@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Foundation
+import MarkdownStickiesCore
 import SwiftUI
 
 @MainActor
@@ -11,10 +12,15 @@ final class NoteStore: ObservableObject {
     @Published var isScanning = false
     /// Temporary: fuzzy search cutoff (Settings slider). Higher = fewer / stricter hits.
     @Published var fuzzyMinimumScore: Double = Double(FuzzyMatch.defaultMinimumScore)
+    /// Paths written from the peer on the last sync.
+    @Published private(set) var syncInboundPaths: Set<String> = []
+    /// Paths we sent that the peer would accept on the last sync.
+    @Published private(set) var syncOutboundPaths: Set<String> = []
 
     let bookmarks: BookmarkStore
     let stateStore: NoteStateStore
     let windowManager: StickyWindowManager
+    let syncService: LanSyncService
 
     private let watcher = FolderWatcher()
     private var rescanTask: Task<Void, Never>?
@@ -53,19 +59,33 @@ final class NoteStore: ObservableObject {
         let bookmarks = BookmarkStore()
         let stateStore = NoteStateStore()
         let windowManager = StickyWindowManager(stateStore: stateStore)
+        let deviceName = Host.current().localizedName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let syncService = LanSyncService(
+            deviceName: (deviceName?.isEmpty == false ? deviceName! : "Mac")
+        )
         self.bookmarks = bookmarks
         self.stateStore = stateStore
         self.windowManager = windowManager
+        self.syncService = syncService
         windowManager.attach(noteStore: self)
+        configureSync()
 
         bookmarks.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+                self?.refreshSyncAdvertising()
+            }
+            .store(in: &cancellables)
+
+        windowManager.objectWillChange
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 self?.objectWillChange.send()
             }
             .store(in: &cancellables)
 
-        windowManager.objectWillChange
+        syncService.objectWillChange
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 self?.objectWillChange.send()
@@ -76,6 +96,105 @@ final class NoteStore: ObservableObject {
     func start() {
         rescan(restoreWindows: true)
         restartWatcher()
+        refreshSyncAdvertising()
+    }
+
+    private func configureSync() {
+        syncService.catalogProvider = { [weak self] in
+            guard let self else { return [] }
+            return SyncCatalogBuilder.catalog(roots: self.bookmarks.syncedURLs())
+        }
+        syncService.onInboundCatalog = { [weak self] remote in
+            self?.applyRemoteCatalog(remote)
+        }
+    }
+
+    private func refreshSyncAdvertising() {
+        if bookmarks.syncedURLs().isEmpty {
+            syncService.stopAdvertising()
+        } else {
+            syncService.startAdvertising()
+            syncService.requestLocalNetworkAuthorization()
+        }
+    }
+
+    func setFolderSynced(_ root: ScanRoot, enabled: Bool) {
+        bookmarks.setSynced(root, enabled: enabled)
+        refreshSyncAdvertising()
+    }
+
+    func syncNow() async {
+        let roots = bookmarks.syncedURLs()
+        guard !roots.isEmpty else {
+            lastError = "Enable Sync on a scan folder in Settings first."
+            return
+        }
+        windowManager.saveAllOpen()
+        lastError = nil
+        do {
+            let remote = try await syncService.syncWithPeer()
+            applyRemoteCatalog(remote)
+        } catch {
+            lastError = LanSyncService.friendlyNetworkError(error)
+        }
+    }
+
+    /// User opened/focused a note — drop the “received” badge (they’ve seen it).
+    func acknowledgeInbound(for path: URL) {
+        let key = path.standardizedFileURL.path
+        guard syncInboundPaths.contains(key) else { return }
+        syncInboundPaths.remove(key)
+    }
+
+    func openNote(_ note: Note) {
+        acknowledgeInbound(for: note.path)
+        windowManager.open(note: note)
+    }
+
+    /// Called when a sticky is opened (or re-focused) — bumps list order.
+    func noteDidOpen(path: URL) {
+        acknowledgeInbound(for: path)
+        sortNotes()
+    }
+
+    private func applyRemoteCatalog(_ remote: [SyncNotePayload]) {
+        let roots = bookmarks.syncedURLs()
+        guard !roots.isEmpty else {
+            lastError = "No synced folder to receive notes."
+            return
+        }
+        // Prefer the marked Default folder when it is synced; else first synced root.
+        let createDir: URL = {
+            if let preferred = preferredCreateDirectory(),
+               roots.contains(where: { $0.standardizedFileURL == preferred.standardizedFileURL }) {
+                return preferred
+            }
+            return roots[0]
+        }()
+        do {
+            let local = SyncCatalogBuilder.catalog(roots: roots)
+            let outboundIDs = SyncMerge.outboundIDs(ours: local, theirs: remote)
+            let localPaths = SyncCatalogBuilder.pathIndex(roots: roots)
+
+            let result = try SyncCatalogBuilder.applyRemoteCatalog(
+                remote,
+                roots: roots,
+                createDirectory: createDir
+            )
+            // Surface received notes at the top of the list (sort uses lastOpenedAt + inbound).
+            let receivedAt = Date()
+            for path in result.appliedPaths {
+                stateStore.touchLastOpened(path, at: receivedAt)
+            }
+            syncInboundPaths = Set(result.appliedPaths.map { $0.standardizedFileURL.path })
+            syncOutboundPaths = Set(outboundIDs.compactMap { localPaths[$0]?.standardizedFileURL.path })
+            rescan(restoreWindows: false)
+            syncService.setStatus(
+                "In \(result.count) · out \(outboundIDs.count) → \(createDir.lastPathComponent)"
+            )
+        } catch {
+            lastError = "Could not apply sync: \(error.localizedDescription)"
+        }
     }
 
     func addScanFolder() {
@@ -86,6 +205,9 @@ final class NoteStore: ObservableObject {
     }
 
     func removeScanFolder(_ root: ScanRoot) {
+        if isDefaultCreateDirectory(root.path) {
+            UserDefaults.standard.removeObject(forKey: Self.defaultCreateDirectoryKey)
+        }
         bookmarks.remove(root)
         rescan(restoreWindows: false)
         restartWatcher()
@@ -96,6 +218,7 @@ final class NoteStore: ObservableObject {
         lastError = nil
         let roots = bookmarks.effectiveScanURLs()
         let scanned = NoteScanner.scan(roots: roots)
+            .filter { !NoteFrontmatter.isTrashed(file: $0.path) }
         let previous = Dictionary(notes.map { ($0.path.path, $0) }, uniquingKeysWith: { _, new in new })
         notes = scanned
         sortNotes()
@@ -110,7 +233,16 @@ final class NoteStore: ObservableObject {
                old.modifiedAt != note.modifiedAt,
                windowManager.isOpen(note.path) {
                 if let content = try? String(contentsOf: note.path, encoding: .utf8) {
-                    windowManager.reloadIfOpen(note: note, content: content)
+                    let ensured = NoteFrontmatter.ensuringSyncID(content)
+                    if ensured.didChange {
+                        let previous = note.modifiedAt
+                        try? ensured.markdown.write(to: note.path, atomically: true, encoding: .utf8)
+                        try? FileManager.default.setAttributes(
+                            [.modificationDate: previous],
+                            ofItemAtPath: note.path.path
+                        )
+                    }
+                    windowManager.reloadIfOpen(note: note, content: ensured.markdown)
                 }
             }
         }
@@ -123,20 +255,14 @@ final class NoteStore: ObservableObject {
         }
     }
 
-    func openNote(_ note: Note) {
-        windowManager.open(note: note)
-    }
-
-    /// Called when a sticky is opened (or re-focused) — bumps list order.
-    func noteDidOpen(path: URL) {
-        sortNotes()
-    }
-
     func createNote(title: String, in directory: URL) {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let effectiveTitle = trimmed.isEmpty ? "Untitled" : trimmed
         let url = NoteFilename.uniqueURL(in: directory, date: Date(), title: effectiveTitle)
-        let initial = "# \(effectiveTitle)\n\n"
+        let initial = NoteFrontmatter.initialDocument(
+            title: effectiveTitle,
+            createdOn: syncService.deviceName
+        )
         do {
             try initial.write(to: url, atomically: true, encoding: .utf8)
             rescan(restoreWindows: false)
@@ -172,23 +298,22 @@ final class NoteStore: ObservableObject {
         let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
         input.stringValue = "Untitled"
         alert.accessoryView = input
+        alert.layout()
         alert.window.initialFirstResponder = input
+        input.selectText(nil)
 
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         createNote(title: input.stringValue, in: directory)
-        rememberCreateDirectory(directory)
     }
 
-    /// Last-used scan root if still valid; else Desktop when scanned; else first scan root.
+    /// Explicit default scan root from Settings; else Desktop when scanned; else first root.
     func preferredCreateDirectory() -> URL? {
         let roots = bookmarks.effectiveScanURLs()
         guard !roots.isEmpty else { return nil }
 
-        if let stored = UserDefaults.standard.string(forKey: Self.preferredCreateDirectoryKey) {
-            let storedURL = URL(fileURLWithPath: stored).standardizedFileURL
-            if let match = roots.first(where: { $0.standardizedFileURL == storedURL }) {
-                return match
-            }
+        if let match = defaultCreateDirectory(),
+           roots.contains(where: { $0.standardizedFileURL == match.standardizedFileURL }) {
+            return match
         }
 
         let desktop = BookmarkStore.desktopURL.standardizedFileURL
@@ -198,11 +323,27 @@ final class NoteStore: ObservableObject {
         return roots.first
     }
 
-    private func rememberCreateDirectory(_ url: URL) {
-        UserDefaults.standard.set(url.standardizedFileURL.path, forKey: Self.preferredCreateDirectoryKey)
+    /// Marked default create folder, if still present in scan roots.
+    func defaultCreateDirectory() -> URL? {
+        guard let stored = UserDefaults.standard.string(forKey: Self.defaultCreateDirectoryKey) else {
+            return nil
+        }
+        let url = URL(fileURLWithPath: stored).standardizedFileURL
+        let roots = bookmarks.effectiveScanURLs()
+        return roots.first(where: { $0.standardizedFileURL == url })
     }
 
-    private static let preferredCreateDirectoryKey = "preferredCreateDirectoryPath"
+    func isDefaultCreateDirectory(_ url: URL) -> Bool {
+        defaultCreateDirectory()?.standardizedFileURL == url.standardizedFileURL
+    }
+
+    func setDefaultCreateDirectory(_ url: URL) {
+        UserDefaults.standard.set(url.standardizedFileURL.path, forKey: Self.defaultCreateDirectoryKey)
+        objectWillChange.send()
+    }
+
+    /// Same UserDefaults key as before so an existing preference becomes the default.
+    private static let defaultCreateDirectoryKey = "preferredCreateDirectoryPath"
 
     func noteFileDidSave(path: URL, modifiedAt: Date) {
         if let index = notes.firstIndex(where: { $0.path.path == path.path }) {
@@ -255,8 +396,13 @@ final class NoteStore: ObservableObject {
     }
 
     /// Recent opens first; never-opened notes fall back to file modification date.
+    /// Just-received sync inbound notes are also opened-touched so they float to the top.
     private func sortNotes() {
         notes.sort { lhs, rhs in
+            let leftInbound = syncInboundPaths.contains(lhs.path.standardizedFileURL.path)
+            let rightInbound = syncInboundPaths.contains(rhs.path.standardizedFileURL.path)
+            if leftInbound != rightInbound { return leftInbound && !rightInbound }
+
             let leftOpened = stateStore.storedState(for: lhs.path)?.lastOpenedAt
             let rightOpened = stateStore.storedState(for: rhs.path)?.lastOpenedAt
             switch (leftOpened, rightOpened) {

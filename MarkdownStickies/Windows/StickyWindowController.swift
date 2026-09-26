@@ -1,4 +1,5 @@
 import AppKit
+import MarkdownStickiesCore
 import SwiftUI
 
 @MainActor
@@ -15,6 +16,10 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
     private var isDirty = false
     private var saveTask: Task<Void, Never>?
     private var suppressExternalReload = false
+    /// When false, the editor hides the YAML frontmatter block.
+    private var showFrontmatter = false
+    private var frontmatterPrefix = ""
+    private var frontmatterToggleButton: NSButton?
 
     var currentColor: NoteColor
     var floatOnTop: Bool
@@ -47,6 +52,9 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
         self.noteTitle = note.title
         self.textSize = state.textSize
         self.columnCount = state.columnCount
+        let parts = NoteFrontmatter.splitDocument(initialText)
+        self.frontmatterPrefix = parts.prefix
+        self.showFrontmatter = false
         self.draftText = initialText
 
         let bg = state.color.nsColor
@@ -83,7 +91,7 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
 
         let body = LivePreviewView(
             noteURL: note.path,
-            text: initialText,
+            text: parts.body,
             background: bg,
             fontSize: state.textSize,
             columnCount: state.columnCount
@@ -372,6 +380,7 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
     }
 
     private func makeActionsMenuView() -> NSView {
+        // Match color-row width so the four icons sit evenly across the menu.
         let width: CGFloat = 200
         let height: CGFloat = 36
         let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
@@ -379,8 +388,8 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
         let stack = NSStackView()
         stack.orientation = .horizontal
         stack.alignment = .centerY
-        stack.distribution = .fillEqually
-        stack.spacing = 4
+        stack.distribution = .equalSpacing
+        stack.spacing = 0
         stack.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(stack)
 
@@ -394,6 +403,11 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
             accessibilityLabel: "Show in Finder",
             action: #selector(revealInFinder(_:))
         )
+        let frontmatterBtn = makeActionIconButton(
+            systemName: "curlybraces",
+            accessibilityLabel: "Show Frontmatter",
+            action: #selector(toggleFrontmatterPressed(_:))
+        )
         let deleteBtn = makeActionIconButton(
             systemName: "trash",
             accessibilityLabel: "Delete Note",
@@ -401,22 +415,23 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
         )
         deleteBtn.contentTintColor = .systemRed
 
-        stack.addArrangedSubview(floatBtn)
-        stack.addArrangedSubview(finderBtn)
-        stack.addArrangedSubview(deleteBtn)
+        for btn in [floatBtn, finderBtn, frontmatterBtn, deleteBtn] {
+            stack.addArrangedSubview(btn)
+            btn.widthAnchor.constraint(equalToConstant: 28).isActive = true
+            btn.heightAnchor.constraint(equalToConstant: 28).isActive = true
+        }
 
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
             stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
             stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 4),
             stack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -4),
-            floatBtn.heightAnchor.constraint(equalToConstant: 28),
-            finderBtn.heightAnchor.constraint(equalToConstant: 28),
-            deleteBtn.heightAnchor.constraint(equalToConstant: 28),
         ])
 
         floatButton = floatBtn
+        frontmatterToggleButton = frontmatterBtn
         updateFloatButtonAppearance()
+        updateFrontmatterButtonAppearance()
         return container
     }
 
@@ -450,6 +465,29 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
         floatButton.contentTintColor = floatOnTop ? .controlAccentColor : .labelColor
         floatButton.toolTip = floatOnTop ? "Don't Float on Top" : "Float on Top"
         floatButton.setAccessibilityLabel(floatButton.toolTip)
+    }
+
+    private func updateFrontmatterButtonAppearance() {
+        guard let frontmatterToggleButton else { return }
+        frontmatterToggleButton.contentTintColor = showFrontmatter ? .controlAccentColor : .labelColor
+        let tip = showFrontmatter ? "Hide Frontmatter" : "Show Frontmatter"
+        frontmatterToggleButton.toolTip = tip
+        frontmatterToggleButton.setAccessibilityLabel(tip)
+    }
+
+    /// Full on-disk document (frontmatter + body), regardless of editor visibility.
+    private var fullDocumentMarkdown: String {
+        if showFrontmatter {
+            return content.markdown
+        }
+        return NoteFrontmatter.joinDocument(prefix: frontmatterPrefix, body: content.markdown)
+    }
+
+    private func presentDocument(_ full: String) {
+        let parts = NoteFrontmatter.splitDocument(full)
+        frontmatterPrefix = parts.prefix
+        draftText = full
+        content.markdown = showFrontmatter ? full : parts.body
     }
 
     private func colorSwatchImage(_ color: NSColor, selected: Bool) -> NSImage {
@@ -497,6 +535,16 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
     @objc private func revealInFinder(_ sender: Any?) {
         colorMenu?.cancelTracking()
         NSWorkspace.shared.activateFileViewerSelecting([notePath])
+    }
+
+    @objc private func toggleFrontmatterPressed(_ sender: Any?) {
+        let full = fullDocumentMarkdown
+        showFrontmatter.toggle()
+        suppressExternalReload = true
+        presentDocument(full)
+        suppressExternalReload = false
+        updateFrontmatterButtonAppearance()
+        // Keep menu open feel: rebuild isn't needed; just refresh tint next open.
     }
 
     @objc private func deleteNotePressed(_ sender: Any?) {
@@ -610,14 +658,13 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
     func applyExternalContent(_ text: String) {
         guard !isDirty else { return }
         suppressExternalReload = true
-        draftText = text
-        content.markdown = text
+        presentDocument(text)
         suppressExternalReload = false
     }
 
     private func handleTextChange(_ text: String) {
         guard !suppressExternalReload else { return }
-        draftText = text
+        draftText = showFrontmatter ? text : NoteFrontmatter.joinDocument(prefix: frontmatterPrefix, body: text)
         isDirty = true
         scheduleSave()
     }
@@ -692,11 +739,16 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
     @discardableResult
     func saveNow() -> Bool {
         saveTask?.cancel()
-        draftText = content.markdown
+        let full = fullDocumentMarkdown
+        draftText = full
         guard isDirty else { return true }
         do {
-            try draftText.write(to: notePath, atomically: true, encoding: .utf8)
+            try full.write(to: notePath, atomically: true, encoding: .utf8)
             isDirty = false
+            // If frontmatter was visible and edited, refresh cached prefix.
+            if showFrontmatter {
+                frontmatterPrefix = NoteFrontmatter.splitDocument(full).prefix
+            }
             let values = try notePath.resourceValues(forKeys: [.contentModificationDateKey])
             manager?.noteDidSave(path: notePath, modifiedAt: values.contentModificationDate ?? Date())
             return true

@@ -2,20 +2,29 @@ import Foundation
 
 /// Lightweight fuzzy matcher for note titles / paths.
 /// Query characters must appear in order; contiguous and word-boundary hits score higher.
-enum FuzzyMatch {
+public enum FuzzyMatch {
     /// Default when callers don’t pass an override (Settings slider owns the live value).
-    static let defaultMinimumScore = 300
+    public static let defaultMinimumScore = 300
 
-    struct Breakdown: Equatable {
-        let total: Int
-        let field: String
-        let weight: Int
-        let raw: Int
-        let lines: [String]
-        let minimumScore: Int
+    public struct Breakdown: Equatable {
+        public let total: Int
+        public let field: String
+        public let weight: Int
+        public let raw: Int
+        public let lines: [String]
+        public let minimumScore: Int
+
+        public init(total: Int, field: String, weight: Int, raw: Int, lines: [String], minimumScore: Int) {
+            self.total = total
+            self.field = field
+            self.weight = weight
+            self.raw = raw
+            self.lines = lines
+            self.minimumScore = minimumScore
+        }
 
         /// Multi-line debug blurb for hover.
-        var detailText: String {
+        public var detailText: String {
             ([
                 "total \(total) = raw \(raw) × \(field) weight \(weight)",
                 "minimumScore \(minimumScore)",
@@ -24,12 +33,12 @@ enum FuzzyMatch {
     }
 
     /// Higher is better. `nil` = no match.
-    static func score(query: String, in text: String) -> Int? {
+    public static func score(query: String, in text: String) -> Int? {
         explain(query: query, in: text)?.score
     }
 
     /// Best weighted score across haystacks, with a calculation breakdown for debug UI.
-    static func bestBreakdown(
+    public static func bestBreakdown(
         query: String,
         in candidates: [(name: String, text: String, weight: Int)],
         minimumScore: Int = defaultMinimumScore
@@ -55,7 +64,7 @@ enum FuzzyMatch {
     }
 
     /// Best score across several haystacks. `nil` when nothing clears `minimumScore`.
-    static func bestScore(
+    public static func bestScore(
         query: String,
         in candidates: [(text: String, weight: Int)],
         minimumScore: Int = defaultMinimumScore
