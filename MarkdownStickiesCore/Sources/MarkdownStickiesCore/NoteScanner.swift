@@ -1,7 +1,7 @@
 import Foundation
 
-enum NoteScanner {
-    static func scan(roots: [URL]) -> [Note] {
+public enum NoteScanner {
+    public static func scan(roots: [URL]) -> [Note] {
         var notes: [Note] = []
         let fm = FileManager.default
 

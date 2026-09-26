@@ -1,5 +1,5 @@
+import MarkdownStickiesCore
 import XCTest
-@testable import MarkdownStickies
 
 final class NoteFilenameTests: XCTestCase {
     func testSlugifyLowercasesAndDashes() {

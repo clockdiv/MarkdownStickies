@@ -33,6 +33,11 @@ struct MarkdownStickiesApp: App {
                     store.windowManager.closeFocusedSticky()
                 }
                 .keyboardShortcut("w", modifiers: [.command])
+
+                Button("Sync Now") {
+                    Task { await store.syncNow() }
+                }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
             }
         }
     }

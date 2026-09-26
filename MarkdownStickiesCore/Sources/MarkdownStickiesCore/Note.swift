@@ -1,18 +1,25 @@
 import Foundation
 
-struct Note: Identifiable, Hashable, Sendable {
-    var id: String { path.path }
-    let path: URL
-    let date: Date
-    let title: String
-    var modifiedAt: Date
+public struct Note: Identifiable, Hashable, Sendable {
+    public var id: String { path.path }
+    public let path: URL
+    public let date: Date
+    public let title: String
+    public var modifiedAt: Date
 
-    var parentDirectory: URL {
+    public init(path: URL, date: Date, title: String, modifiedAt: Date) {
+        self.path = path
+        self.date = date
+        self.title = title
+        self.modifiedAt = modifiedAt
+    }
+
+    public var parentDirectory: URL {
         path.deletingLastPathComponent()
     }
 
     /// e.g. `Desktop` or `Desktop / projects / notes` — scan root name + relative subfolders.
-    static func locationLabel(for notePath: URL, scanRoots: [URL]) -> String {
+    public static func locationLabel(for notePath: URL, scanRoots: [URL]) -> String {
         let noteDir = notePath.deletingLastPathComponent().standardizedFileURL
         let noteDirPath = noteDir.path
 
@@ -41,7 +48,7 @@ struct Note: Identifiable, Hashable, Sendable {
     }
 
     /// Root scan-folder name and optional `sub/folders` path (no leading slash).
-    static func locationParts(for notePath: URL, scanRoots: [URL]) -> (root: String, subpath: String?) {
+    public static func locationParts(for notePath: URL, scanRoots: [URL]) -> (root: String, subpath: String?) {
         let label = locationLabel(for: notePath, scanRoots: scanRoots)
         if let slash = label.firstIndex(of: "/") {
             let root = String(label[..<slash])
@@ -52,12 +59,12 @@ struct Note: Identifiable, Hashable, Sendable {
     }
 }
 
-enum NoteFilename {
+public enum NoteFilename {
     /// Optional dated prefix: `yyyy-MM-dd-title.md`
     private static let datedPattern = #"^(\d{4}-\d{2}-\d{2})-(.+)$"#
     private static let datedRegex = try! NSRegularExpression(pattern: datedPattern)
 
-    static let dateFormatter: DateFormatter = {
+    public static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.timeZone = TimeZone.current
@@ -65,11 +72,11 @@ enum NoteFilename {
         return f
     }()
 
-    static func matches(_ filename: String) -> Bool {
+    public static func matches(_ filename: String) -> Bool {
         filename.lowercased().hasSuffix(".md")
     }
 
-    static func parse(url: URL, modifiedAt: Date) -> Note? {
+    public static func parse(url: URL, modifiedAt: Date) -> Note? {
         let filename = url.lastPathComponent
         guard matches(filename) else { return nil }
 
@@ -99,7 +106,7 @@ enum NoteFilename {
         )
     }
 
-    static func datePrefix(from url: URL) -> String? {
+    public static func datePrefix(from url: URL) -> String? {
         let stem = url.deletingPathExtension().lastPathComponent
         let range = NSRange(stem.startIndex..., in: stem)
         guard let match = datedRegex.firstMatch(in: stem, range: range),
@@ -112,7 +119,7 @@ enum NoteFilename {
     }
 
     /// New file URL for a rename, preserving any `yyyy-MM-dd-` prefix and avoiding collisions.
-    static func uniqueRenamedURL(from current: URL, newTitle: String) -> URL {
+    public static func uniqueRenamedURL(from current: URL, newTitle: String) -> URL {
         let directory = current.deletingLastPathComponent()
         let slug = slugify(newTitle)
         let currentStandard = current.standardizedFileURL
@@ -137,7 +144,7 @@ enum NoteFilename {
         return url
     }
 
-    static func displayTitle(from slug: String) -> String {
+    public static func displayTitle(from slug: String) -> String {
         slug
             .replacingOccurrences(of: "-", with: " ")
             .replacingOccurrences(of: "_", with: " ")
@@ -149,7 +156,7 @@ enum NoteFilename {
             .joined(separator: " ")
     }
 
-    static func slugify(_ title: String) -> String {
+    public static func slugify(_ title: String) -> String {
         let lowered = title.lowercased()
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: " -_"))
         let filtered = lowered.unicodeScalars.map { allowed.contains($0) ? Character($0) : Character("-") }
@@ -161,13 +168,13 @@ enum NoteFilename {
         return collapsed.isEmpty ? "note" : collapsed
     }
 
-    static func makeFilename(date: Date, title: String) -> String {
+    public static func makeFilename(date: Date, title: String) -> String {
         let datePart = dateFormatter.string(from: date)
         let slug = slugify(title)
         return "\(datePart)-\(slug).md"
     }
 
-    static func uniqueURL(in directory: URL, date: Date, title: String) -> URL {
+    public static func uniqueURL(in directory: URL, date: Date, title: String) -> URL {
         let baseSlug = slugify(title)
         let datePart = dateFormatter.string(from: date)
         var candidate = directory.appendingPathComponent("\(datePart)-\(baseSlug).md")

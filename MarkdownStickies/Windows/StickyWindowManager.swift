@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import MarkdownStickiesCore
 
 @MainActor
 final class StickyWindowManager: ObservableObject {
@@ -32,9 +33,18 @@ final class StickyWindowManager: ObservableObject {
 
         let content: String
         do {
-            content = try String(contentsOf: note.path, encoding: .utf8)
+            let raw = try String(contentsOf: note.path, encoding: .utf8)
+            let ensured = NoteFrontmatter.ensuringSyncID(raw)
+            content = ensured.markdown
+            if ensured.didChange {
+                try? writePreservingModifiedDate(ensured.markdown, to: note.path)
+            }
         } catch {
-            content = ""
+            content = NoteFrontmatter.initialDocument(
+                title: note.title,
+                createdOn: noteStore?.syncService.deviceName
+            )
+            try? content.write(to: note.path, atomically: true, encoding: .utf8)
         }
 
         let state = stateStore.state(for: note.path)
@@ -128,6 +138,7 @@ final class StickyWindowManager: ObservableObject {
 
     func stickyDidBecomeActive(path: URL) {
         activePath = path.path
+        noteStore?.noteDidOpen(path: path)
     }
 
     func stickyDidResignActive(path: URL) {
@@ -161,16 +172,20 @@ final class StickyWindowManager: ObservableObject {
     }
 
     /// Renames the on-disk `.md` file (slugified). Preserves date prefix when present.
+    /// Filename is the title source of truth — bumps mtime so LAN sync converges the name
+    /// (identical-body + divergent titles already merge via `SyncMerge`).
     @discardableResult
     func renameNote(path: URL, toTitle title: String) -> (path: URL, displayTitle: String)? {
         guard let controller = controllers[path.path] else { return nil }
         controller.saveNow()
 
-        let newURL = NoteFilename.uniqueRenamedURL(from: path, newTitle: title)
         let slug = NoteFilename.slugify(title)
         let displayTitle = NoteFilename.displayTitle(from: slug)
 
+        let newURL = NoteFilename.uniqueRenamedURL(from: path, newTitle: title)
+
         if newURL.standardizedFileURL == path.standardizedFileURL {
+            touchForSync(path)
             controller.applyRenamedPath(path, displayTitle: displayTitle)
             noteStore?.noteDidRename(from: path, to: path, displayTitle: displayTitle)
             return (path, displayTitle)
@@ -178,6 +193,7 @@ final class StickyWindowManager: ObservableObject {
 
         do {
             try FileManager.default.moveItem(at: path, to: newURL)
+            touchForSync(newURL)
         } catch {
             return nil
         }
@@ -195,7 +211,7 @@ final class StickyWindowManager: ObservableObject {
         return (newURL, displayTitle)
     }
 
-    /// Moves the note file to Trash, closes the sticky, and refreshes the note list.
+    /// Moves the note into the vault `Trash/` folder (synced), closes the sticky, refreshes the list.
     func deleteNote(path: URL) {
         if let controller = controllers[path.path] {
             controller.saveNow()
@@ -203,13 +219,37 @@ final class StickyWindowManager: ObservableObject {
             controllers.removeValue(forKey: path.path)
             openPaths.remove(path.path)
         }
+        let roots = noteStore?.bookmarks.effectiveScanURLs() ?? []
         do {
-            try FileManager.default.trashItem(at: path, resultingItemURL: nil)
+            let trashed = try NoteFrontmatter.moveToTrash(file: path, roots: roots)
+            stateStore.relocate(from: path, to: trashed)
+            stateStore.setOpen(trashed, isOpen: false)
+            noteStore?.noteWasDeleted(path: path)
         } catch {
-            // Fallback: permanent delete if Trash fails.
-            try? FileManager.default.removeItem(at: path)
+            // Last resort: system Trash (won’t sync).
+            try? FileManager.default.trashItem(at: path, resultingItemURL: nil)
+            stateStore.remove(path: path)
+            noteStore?.noteWasDeleted(path: path)
         }
-        stateStore.remove(path: path)
-        noteStore?.noteWasDeleted(path: path)
+    }
+
+    /// Bump mtime so a rename wins the next LAN merge without rewriting the body.
+    private func touchForSync(_ url: URL) {
+        let now = Date()
+        try? FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: url.path)
+        noteStore?.noteFileDidSave(path: url, modifiedAt: now)
+    }
+
+    /// Stamp missing sync id without making the note look newly edited.
+    private func writePreservingModifiedDate(_ text: String, to url: URL) throws {
+        let previous = try url.resourceValues(forKeys: [.contentModificationDateKey])
+            .contentModificationDate
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        if let previous {
+            try FileManager.default.setAttributes(
+                [.modificationDate: previous],
+                ofItemAtPath: url.path
+            )
+        }
     }
 }

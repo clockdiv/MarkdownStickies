@@ -1,5 +1,6 @@
-import SwiftUI
 import AppKit
+import MarkdownStickiesCore
+import SwiftUI
 
 struct ControlWindowView: View {
     @EnvironmentObject private var store: NoteStore
@@ -33,10 +34,27 @@ struct ControlWindowView: View {
             Spacer(minLength: 0)
 
             Button {
+                Task { await store.syncNow() }
+            } label: {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 15, weight: .regular))
+                    .foregroundStyle(Self.iconColor)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+                    .opacity(store.syncService.isSyncing ? 0.45 : 1)
+            }
+            .buttonStyle(.plain)
+            .disabled(store.syncService.isSyncing || store.bookmarks.syncedURLs().isEmpty)
+            .help(store.bookmarks.syncedURLs().isEmpty
+                  ? "Enable Sync on a folder in Settings"
+                  : (store.syncService.lastStatus ?? "Sync with iOS on this network"))
+            .onHover { setHandCursor($0) }
+
+            Button {
                 store.promptCreateNote()
             } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 16, weight: .regular))
+                Image(systemName: "square.and.pencil")
+                    .font(.system(size: 15, weight: .regular))
                     .foregroundStyle(Self.iconColor)
                     .frame(width: 24, height: 24)
                     .contentShape(Rectangle())
@@ -143,6 +161,8 @@ struct ControlWindowView: View {
                         isActive: activePath == note.path.path,
                         noteColor: store.stateStore.storedState(for: note.path)?.color,
                         scanRoots: scanRoots,
+                        wasReceived: store.syncInboundPaths.contains(note.path.standardizedFileURL.path),
+                        wasSent: store.syncOutboundPaths.contains(note.path.standardizedFileURL.path),
                         onOpen: { store.openNote(note) }
                     )
                     .listRowSeparator(.hidden)
@@ -163,7 +183,7 @@ struct ControlWindowView: View {
             Text("Scan Folders")
                 .font(.headline)
 
-            Text("Add folders to scan for .md files. Only these folders are watched.")
+            Text("Add folders to scan for .md files. Mark one as Default for new notes. Toggle Sync to include a folder in LAN sync with iOS.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -174,16 +194,50 @@ struct ControlWindowView: View {
             } else {
                 List {
                     ForEach(store.bookmarks.roots) { root in
-                        HStack {
+                        HStack(spacing: 10) {
+                            Button {
+                                store.setDefaultCreateDirectory(root.path)
+                            } label: {
+                                Image(systemName: store.isDefaultCreateDirectory(root.path)
+                                      ? "star.fill" : "star")
+                                    .foregroundStyle(store.isDefaultCreateDirectory(root.path)
+                                                     ? Color.accentColor : .secondary)
+                            }
+                            .buttonStyle(.borderless)
+                            .help(store.isDefaultCreateDirectory(root.path)
+                                  ? "Default folder for new notes"
+                                  : "Make default for new notes")
+
                             VStack(alignment: .leading) {
-                                Text(root.path.lastPathComponent)
-                                    .font(.body.weight(.medium))
+                                HStack(spacing: 6) {
+                                    Text(root.path.lastPathComponent)
+                                        .font(.body.weight(.medium))
+                                    if store.isDefaultCreateDirectory(root.path) {
+                                        Text("Default")
+                                            .font(.caption2.weight(.semibold))
+                                            .foregroundStyle(.secondary)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(
+                                                Capsule(style: .continuous)
+                                                    .fill(Color.primary.opacity(0.08))
+                                            )
+                                    }
+                                }
                                 Text(root.path.path)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .lineLimit(2)
                             }
                             Spacer()
+                            Toggle("Sync", isOn: Binding(
+                                get: { root.isSynced },
+                                set: { store.setFolderSynced(root, enabled: $0) }
+                            ))
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                            .help("Include this folder in LAN sync")
+
                             Button(role: .destructive) {
                                 store.removeScanFolder(root)
                             } label: {
@@ -194,6 +248,12 @@ struct ControlWindowView: View {
                     }
                 }
                 .frame(minHeight: 160)
+            }
+
+            if let status = store.syncService.lastStatus {
+                Text(status)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             HStack {
@@ -242,6 +302,8 @@ private struct NoteListRow: View {
     /// Color from note-state when present (open or previously configured).
     let noteColor: NoteColor?
     let scanRoots: [URL]
+    let wasReceived: Bool
+    let wasSent: Bool
     let onOpen: () -> Void
 
     @State private var isHovered = false
@@ -267,11 +329,26 @@ private struct NoteListRow: View {
                     .padding(.top, 3)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(note.title)
-                        .font(.system(size: 14, weight: .light))
-                        .foregroundStyle(titleForeground)
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    HStack(spacing: 6) {
+                        Text(note.title)
+                            .font(.system(size: 14, weight: .light))
+                            .foregroundStyle(titleForeground)
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                        if wasReceived {
+                            Image(systemName: "arrow.down.circle.fill")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.green)
+                                .help("Received from peer on last sync")
+                        }
+                        if wasSent {
+                            Image(systemName: "arrow.up.circle.fill")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.blue)
+                                .help("Sent to peer on last sync")
+                        }
+                    }
 
                     locationLine
                         .font(.system(size: 11, design: .monospaced))
