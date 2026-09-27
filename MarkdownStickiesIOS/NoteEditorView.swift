@@ -1,5 +1,6 @@
 import MarkdownStickiesCore
 import SwiftUI
+import UIKit
 
 struct NoteEditorView: View {
     let note: Note
@@ -11,11 +12,15 @@ struct NoteEditorView: View {
     @State private var loadError: String?
     @State private var saveError: String?
     @State private var saveTask: Task<Void, Never>?
+    @State private var previewImageURL: URL?
+    @State private var missingImageMessage: String?
 
     var body: some View {
-        TextEditor(text: $editorText)
-            .font(.body.monospaced())
-            .padding(8)
+        MarkdownSourceEditor(
+            text: $editorText,
+            noteDirectory: note.path.deletingLastPathComponent(),
+            onOpenURL: openImageURL
+        )
             .navigationTitle(note.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -44,6 +49,17 @@ struct NoteEditorView: View {
                 saveTask?.cancel()
                 saveNow()
             }
+            .fullScreenCover(isPresented: Binding(
+                get: { previewImageURL != nil },
+                set: { if !$0 { previewImageURL = nil } }
+            )) {
+                if let previewImageURL {
+                    ImageQuickLook(url: previewImageURL) {
+                        self.previewImageURL = nil
+                    }
+                    .ignoresSafeArea()
+                }
+            }
             .alert(
                 "Could not open",
                 isPresented: Binding(
@@ -66,6 +82,30 @@ struct NoteEditorView: View {
             } message: {
                 Text(saveError ?? "")
             }
+            .alert(
+                "Image not found",
+                isPresented: Binding(
+                    get: { missingImageMessage != nil },
+                    set: { if !$0 { missingImageMessage = nil } }
+                )
+            ) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(missingImageMessage ?? "")
+            }
+    }
+
+    private func openImageURL(_ url: URL) {
+        if url.scheme == "http" || url.scheme == "https" {
+            UIApplication.shared.open(url)
+            return
+        }
+        let file = url.standardizedFileURL
+        guard FileManager.default.fileExists(atPath: file.path) else {
+            missingImageMessage = file.lastPathComponent
+            return
+        }
+        previewImageURL = file
     }
 
     private var fullDocument: String {

@@ -17,7 +17,12 @@ public final class LanSyncService: ObservableObject {
     @Published public private(set) var isSyncing = false
 
     public var catalogProvider: (() -> [SyncNotePayload])?
-    public var onInboundCatalog: (([SyncNotePayload]) -> Void)?
+    /// Folders used for note-adjacent image discovery / apply (protocol ≥ 3).
+    public var syncRootsProvider: (() -> [URL])?
+    /// Apply a remote catalog and return which note IDs were written (for peer ACK).
+    public var onApplyRemoteCatalog: (([SyncNotePayload]) -> SyncApplyAck)?
+    /// Fired after a full exchange finishes (client or server), with honest feedback.
+    public var onExchangeFinished: ((SyncExchangeResult, SyncExchangeRole) -> Void)?
 
     private var listener: NWListener?
     private var publishedPort: NWEndpoint.Port?
@@ -142,9 +147,10 @@ public final class LanSyncService: ObservableObject {
         netService = service
     }
 
-    /// Browse for a peer, connect, exchange catalogs.
+    /// Browse for a peer, connect, exchange catalogs with apply ACKs.
     /// Press Sync on **one** device; the other only needs to be open + discoverable.
-    public func syncWithPeer(timeoutSeconds: TimeInterval = 20) async throws -> [SyncNotePayload] {
+    /// Retries once if the peer does not confirm all expected outbound notes.
+    public func syncWithPeer(timeoutSeconds: TimeInterval = 20) async throws -> SyncExchangeResult {
         guard !isSyncing else { throw SyncProtocolError.connectionFailed("Sync already in progress.") }
         isSyncing = true
         lastStatus = "Looking for peer…"
@@ -167,11 +173,21 @@ public final class LanSyncService: ObservableObject {
         }
 
         lastStatus = "Connecting…"
-        let localNotes = catalogProvider?() ?? []
         do {
-            let remote = try await exchangeAsClient(endpoint: endpoint, localNotes: localNotes)
-            lastStatus = "Received \(remote.count) note(s) from peer (applied on this device)"
-            return remote
+            var result = try await exchangeAsClient(endpoint: endpoint)
+            if !result.peerConfirmedOutbound, result.peerSupportsAck, !result.unconfirmedOutboundIDs.isEmpty {
+                lastStatus = "Peer missing \(result.unconfirmedOutboundIDs.count) note(s) — retrying…"
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                result = try await exchangeAsClient(endpoint: endpoint)
+            }
+            let feedback = SyncFeedback.from(
+                result: result,
+                role: .client,
+                peerName: result.peerDeviceName
+            )
+            lastStatus = feedback.statusLine
+            onExchangeFinished?(result, .client)
+            return result
         } catch {
             lastStatus = Self.friendlyNetworkError(error)
             throw error
@@ -239,7 +255,7 @@ public final class LanSyncService: ObservableObject {
 
     // MARK: - Connections
 
-    private func exchangeAsClient(endpoint: NWEndpoint, localNotes: [SyncNotePayload]) async throws -> [SyncNotePayload] {
+    private func exchangeAsClient(endpoint: NWEndpoint) async throws -> SyncExchangeResult {
         let parameters = NWParameters.tcp
         parameters.includePeerToPeer = true
         // Avoid racing happy-eyeballs forever on flaky .local DNS.
@@ -251,6 +267,7 @@ public final class LanSyncService: ObservableObject {
             Task { @MainActor in self?.lastStatus = text }
         }
         lastStatus = "Exchanging notes…"
+        let localNotes = catalogProvider?() ?? []
         return try await receiveCatalogExchange(
             connection: connection,
             localNotes: localNotes,
@@ -309,13 +326,20 @@ public final class LanSyncService: ObservableObject {
     private func handleInbound(_ connection: NWConnection) async {
         do {
             try await startAndWaitReady(connection, timeoutSeconds: 12)
-            let remoteCatalog = try await receiveCatalogExchange(
+            let result = try await receiveCatalogExchange(
                 connection: connection,
                 localNotes: catalogProvider?() ?? [],
                 asServer: true
             )
-            onInboundCatalog?(remoteCatalog)
-            lastStatus = "Peer pushed \(remoteCatalog.count) note(s) — applied on this device"
+            let feedback = SyncFeedback.from(
+                result: result,
+                role: .server,
+                peerName: result.peerDeviceName
+            )
+            if !isSyncing {
+                lastStatus = feedback.statusLine
+            }
+            onExchangeFinished?(result, .server)
         } catch {
             if !isSyncing {
                 lastStatus = Self.friendlyNetworkError(error)
@@ -328,32 +352,212 @@ public final class LanSyncService: ObservableObject {
         connection: NWConnection,
         localNotes: [SyncNotePayload],
         asServer: Bool
-    ) async throws -> [SyncNotePayload] {
+    ) async throws -> SyncExchangeResult {
         // Shared across reads so coalesced TCP frames aren't dropped.
         var buffer = Data()
 
         if !asServer {
             lastStatus = "Exchanging notes… (sending)"
             try await send(SyncWireMessage.hello(peerID: peerID, deviceName: deviceName), on: connection)
-            try await send(SyncWireMessage.catalog(localNotes), on: connection)
+            try await send(SyncWireMessage.catalog(localNotes, deviceName: deviceName), on: connection)
             lastStatus = "Exchanging notes… (waiting for peer)"
-            let reply = try await receiveMessage(on: connection, buffer: &buffer, timeoutSeconds: 30)
-            guard reply.kind == .catalog, let notes = reply.notes else {
+            let reply = try await receiveMessage(on: connection, buffer: &buffer, timeoutSeconds: 45)
+            guard reply.kind == .catalog, let remoteNotes = reply.notes else {
                 throw SyncProtocolError.unexpectedMessage(reply.kind)
             }
-            return notes
+
+            let peerAppliedIDs = reply.appliedIDs ?? []
+            let peerSupportsAck = reply.appliedIDs != nil
+            let peerVersion = reply.protocolVersion ?? 1
+
+            lastStatus = "Exchanging notes… (applying)"
+            let localAck = applyRemote(remoteNotes)
+            try await send(SyncWireMessage.applied(localAck.appliedIDs), on: connection)
+
+            // Peer catalog is *after* they applied our notes — remaining = still missing there.
+            let remainingOutbound = SyncMerge.outboundIDs(ours: localNotes, theirs: remoteNotes)
+            var imagesReceived = 0
+            var imagesSent = 0
+            if peerVersion >= 3 {
+                let images = try await exchangeAssets(
+                    connection: connection,
+                    buffer: &buffer,
+                    asServer: false
+                )
+                imagesReceived = images.received
+                imagesSent = images.sent
+            }
+
+            return SyncExchangeResult(
+                remoteNotes: remoteNotes,
+                peerAppliedIDs: peerAppliedIDs,
+                localAppliedIDs: localAck.appliedIDs,
+                remainingOutboundIDs: remainingOutbound,
+                peerSupportsAck: peerSupportsAck,
+                peerDeviceName: reply.deviceName,
+                imagesReceived: imagesReceived,
+                imagesSent: imagesSent
+            )
         } else {
             let hello = try await receiveMessage(on: connection, buffer: &buffer, timeoutSeconds: 30)
             guard hello.kind == .hello else {
                 throw SyncProtocolError.unexpectedMessage(hello.kind)
             }
-            let incoming = try await receiveMessage(on: connection, buffer: &buffer, timeoutSeconds: 30)
+            let clientSupportsAck = (hello.protocolVersion ?? 1) >= 2
+            let clientSupportsAssets = (hello.protocolVersion ?? 1) >= 3
+            let peerName = hello.deviceName
+
+            let incoming = try await receiveMessage(on: connection, buffer: &buffer, timeoutSeconds: 45)
             guard incoming.kind == .catalog, let remoteNotes = incoming.notes else {
                 throw SyncProtocolError.unexpectedMessage(incoming.kind)
             }
-            try await send(SyncWireMessage.catalog(localNotes), on: connection)
-            return remoteNotes
+
+            // Apply *before* answering so the client's "out N" can be confirmed.
+            let serverAck = applyRemote(remoteNotes)
+            // Re-read local catalog after apply so the peer gets our post-merge state.
+            let freshLocal = catalogProvider?() ?? localNotes
+
+            try await send(
+                SyncWireMessage.catalog(freshLocal, appliedIDs: serverAck.appliedIDs, deviceName: deviceName),
+                on: connection
+            )
+
+            var clientAppliedIDs: [UUID] = []
+            var peerSupportsAck = clientSupportsAck
+            if clientSupportsAck {
+                do {
+                    let clientAck = try await receiveMessage(on: connection, buffer: &buffer, timeoutSeconds: 20)
+                    if clientAck.kind == .applied {
+                        clientAppliedIDs = clientAck.appliedIDs ?? []
+                    } else {
+                        peerSupportsAck = false
+                    }
+                } catch {
+                    // Client closed without ACK (older app or crash) — report unconfirmed.
+                    peerSupportsAck = false
+                }
+            }
+
+            // What the client still needs from us after they applied our catalog.
+            // Prefer remaining vs their ACK set when they ACKed; else predict from their original catalog.
+            let remainingOutbound: [UUID]
+            if peerSupportsAck {
+                let predicted = SyncMerge.outboundIDs(ours: freshLocal, theirs: remoteNotes)
+                let acked = Set(clientAppliedIDs)
+                remainingOutbound = predicted.filter { !acked.contains($0) }
+            } else {
+                remainingOutbound = SyncMerge.outboundIDs(ours: freshLocal, theirs: remoteNotes)
+            }
+
+            var imagesReceived = 0
+            var imagesSent = 0
+            if clientSupportsAssets {
+                let images = try await exchangeAssets(
+                    connection: connection,
+                    buffer: &buffer,
+                    asServer: true
+                )
+                imagesReceived = images.received
+                imagesSent = images.sent
+            }
+
+            return SyncExchangeResult(
+                remoteNotes: remoteNotes,
+                peerAppliedIDs: clientAppliedIDs,
+                localAppliedIDs: serverAck.appliedIDs,
+                remainingOutboundIDs: remainingOutbound,
+                peerSupportsAck: peerSupportsAck,
+                peerDeviceName: peerName ?? incoming.deviceName,
+                imagesReceived: imagesReceived,
+                imagesSent: imagesSent
+            )
         }
+    }
+
+    private struct AssetExchangeCounts {
+        var received: Int
+        var sent: Int
+    }
+
+    /// Mutual offer lists, then client pushes images the server needs, then server pushes images the client needs.
+    private func exchangeAssets(
+        connection: NWConnection,
+        buffer: inout Data,
+        asServer: Bool
+    ) async throws -> AssetExchangeCounts {
+        let roots = syncRootsProvider?() ?? []
+        lastStatus = "Exchanging images…"
+        let localOffers = SyncImageAssets.offers(roots: roots)
+
+        if !asServer {
+            try await send(SyncWireMessage.assetOffers(localOffers), on: connection)
+            let reply = try await receiveMessage(on: connection, buffer: &buffer, timeoutSeconds: 45)
+            guard reply.kind == .assetOffers else {
+                throw SyncProtocolError.unexpectedMessage(reply.kind)
+            }
+            let remoteOffers = reply.assetOffers ?? []
+
+            let peerNeeds = SyncImageAssets.missingOffers(theirs: localOffers, ours: remoteOffers)
+            let sent = try await sendAssetBlobs(offers: peerNeeds, roots: roots, on: connection)
+            let received = try await receiveAssetBlobs(on: connection, buffer: &buffer, roots: roots)
+            return AssetExchangeCounts(received: received, sent: sent)
+        } else {
+            let incoming = try await receiveMessage(on: connection, buffer: &buffer, timeoutSeconds: 45)
+            guard incoming.kind == .assetOffers else {
+                throw SyncProtocolError.unexpectedMessage(incoming.kind)
+            }
+            let remoteOffers = incoming.assetOffers ?? []
+            try await send(SyncWireMessage.assetOffers(localOffers), on: connection)
+
+            let peerNeeds = SyncImageAssets.missingOffers(theirs: localOffers, ours: remoteOffers)
+            let received = try await receiveAssetBlobs(on: connection, buffer: &buffer, roots: roots)
+            let sent = try await sendAssetBlobs(offers: peerNeeds, roots: roots, on: connection)
+            return AssetExchangeCounts(received: received, sent: sent)
+        }
+    }
+
+    private func sendAssetBlobs(
+        offers: [SyncAssetOffer],
+        roots: [URL],
+        on connection: NWConnection
+    ) async throws -> Int {
+        var sent = 0
+        for offer in offers {
+            guard let blob = SyncImageAssets.loadBlob(offer: offer, roots: roots) else { continue }
+            lastStatus = "Exchanging images… (sending \(sent + 1))"
+            try await send(SyncWireMessage.assetBlobs([blob]), on: connection)
+            sent += 1
+        }
+        try await send(SyncWireMessage.assetBlobs([]), on: connection)
+        return sent
+    }
+
+    private func receiveAssetBlobs(
+        on connection: NWConnection,
+        buffer: inout Data,
+        roots: [URL]
+    ) async throws -> Int {
+        var received = 0
+        while true {
+            let message = try await receiveMessage(on: connection, buffer: &buffer, timeoutSeconds: 90)
+            guard message.kind == .assetBlobs else {
+                throw SyncProtocolError.unexpectedMessage(message.kind)
+            }
+            let blobs = message.assetBlobs ?? []
+            if blobs.isEmpty { break }
+            for blob in blobs {
+                lastStatus = "Exchanging images… (receiving \(received + 1))"
+                if (try? SyncImageAssets.applyBlob(blob, roots: roots)) != nil {
+                    received += 1
+                }
+            }
+        }
+        return received
+    }
+
+    private func applyRemote(_ remote: [SyncNotePayload]) -> SyncApplyAck {
+        guard let onApplyRemoteCatalog else { return .empty }
+        return onApplyRemoteCatalog(remote)
     }
 
     private func send(_ message: SyncWireMessage, on connection: NWConnection) async throws {

@@ -126,6 +126,13 @@ final class StickyWindowManager: ObservableObject {
         controllers[note.path.path]?.applyExternalContent(content)
     }
 
+    /// Refresh open previews (e.g. after image assets sync).
+    func reloadOpenPreviewMedia() {
+        for controller in controllers.values {
+            controller.reloadPreviewMedia()
+        }
+    }
+
     func stickyWillClose(path: URL, frame: CGRect) {
         controllers.removeValue(forKey: path.path)
         openPaths.remove(path.path)

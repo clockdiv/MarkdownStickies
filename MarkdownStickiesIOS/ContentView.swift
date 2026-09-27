@@ -39,6 +39,13 @@ struct ContentView: View {
                 SettingsView(isPickingFolder: $isPickingFolder)
             }
         }
+        .overlay {
+            if let banner = vault.syncBanner {
+                SyncBannerOverlay(feedback: banner) {
+                    vault.dismissSyncBanner()
+                }
+            }
+        }
         .alert("New Note", isPresented: $showingNewNote) {
             TextField("Title", text: $newNoteTitle)
             Button("Create") { createNote() }
@@ -167,13 +174,11 @@ struct ContentView: View {
                         }
                         Spacer(minLength: 0)
                         if vault.syncInboundPaths.contains(note.path.standardizedFileURL.path) {
-                            Image(systemName: "arrow.down.circle.fill")
-                                .foregroundStyle(.green)
+                            SyncDirectionBadge(direction: .received)
                                 .accessibilityLabel("Received from peer")
                         }
                         if vault.syncOutboundPaths.contains(note.path.standardizedFileURL.path) {
-                            Image(systemName: "arrow.up.circle.fill")
-                                .foregroundStyle(.blue)
+                            SyncDirectionBadge(direction: .sent)
                                 .accessibilityLabel("Sent to peer")
                         }
                     }
@@ -218,5 +223,40 @@ struct ContentView: View {
         } catch {
             vault.lastError = "Could not create note: \(error.localizedDescription)"
         }
+    }
+}
+
+/// Compact sync direction chip: green ↓ received, blue → sent.
+private struct SyncDirectionBadge: View {
+    enum Direction {
+        case received
+        case sent
+    }
+
+    let direction: Direction
+
+    private var fill: Color {
+        switch direction {
+        case .received: return .green
+        case .sent: return .blue
+        }
+    }
+
+    private var arrow: String {
+        switch direction {
+        case .received: return "arrow.down"
+        case .sent: return "arrow.right"
+        }
+    }
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(fill)
+            Image(systemName: arrow)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.white)
+        }
+        .frame(width: 16, height: 16)
     }
 }

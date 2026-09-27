@@ -38,6 +38,7 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
     private var expandedFrame: NSRect?
     private let normalMinSize = NSSize(width: 180, height: 140)
     private let collapsedHeight: CGFloat = 28
+    private var htmlConvertWindow: HTMLConvertWindowController?
 
     init(
         note: Note,
@@ -123,6 +124,9 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
         body.onTextChange = { [weak self] text in
             self?.handleTextChange(text)
         }
+        body.onRequestImmediateSave = { [weak self] in
+            _ = self?.saveNow()
+        }
         titlebar.onDoubleClick = { [weak self] in
             self?.toggleCollapsed()
         }
@@ -163,6 +167,12 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
         let actionsItem = NSMenuItem()
         actionsItem.view = makeActionsMenuView()
         menu.addItem(actionsItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let convertItem = NSMenuItem()
+        convertItem.view = makeConvertMenuView()
+        menu.addItem(convertItem)
 
         colorMenu = menu
         syncColorMenu()
@@ -435,6 +445,30 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
         return container
     }
 
+    private func makeConvertMenuView() -> NSView {
+        let width: CGFloat = 200
+        let height: CGFloat = 32
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+
+        let button = NSButton(title: "Convert to .md", target: self, action: #selector(convertHTMLToMarkdownPressed(_:)))
+        button.bezelStyle = .inline
+        button.isBordered = false
+        button.alignment = .center
+        button.font = .systemFont(ofSize: 12, weight: .medium)
+        button.contentTintColor = .labelColor
+        button.toolTip = "Convert HTML in this note to Markdown"
+        button.setAccessibilityLabel("Convert to .md")
+        button.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(button)
+
+        NSLayoutConstraint.activate([
+            button.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
+            button.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
+            button.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+        ])
+        return container
+    }
+
     private func makeActionIconButton(
         systemName: String,
         accessibilityLabel: String,
@@ -552,6 +586,63 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
         confirmAndDeleteNote()
     }
 
+    @objc private func convertHTMLToMarkdownPressed(_ sender: Any?) {
+        colorMenu?.cancelTracking()
+        openHTMLConvertWindow()
+    }
+
+    private func openHTMLConvertWindow() {
+        saveNow()
+        let full = fullDocumentMarkdown
+        let parts = NoteFrontmatter.splitDocument(full)
+        let source = parts.body.isEmpty && parts.prefix.isEmpty ? full : parts.body
+
+        guard HTMLToMarkdown.looksLikeHTML(source) else {
+            let alert = NSAlert()
+            alert.messageText = "No HTML Found"
+            alert.informativeText = "This note doesn’t look like it contains HTML tags to convert."
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return
+        }
+
+        if let existing = htmlConvertWindow, existing.window?.isVisible == true {
+            existing.window?.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let prefix = parts.prefix
+        let controller = HTMLConvertWindowController(
+            sourceHTML: source,
+            noteURL: notePath,
+            background: currentColor.nsColor,
+            fontSize: textSize,
+            onApply: { [weak self] markdown in
+                self?.applyConvertedMarkdown(markdown, frontmatterPrefix: prefix)
+            }
+        )
+        controller.onClose = { [weak self] in
+            self?.htmlConvertWindow = nil
+        }
+        htmlConvertWindow = controller
+        controller.window?.center()
+        controller.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func applyConvertedMarkdown(_ markdown: String, frontmatterPrefix: String) {
+        let newFull = frontmatterPrefix.isEmpty
+            ? markdown
+            : NoteFrontmatter.joinDocument(prefix: frontmatterPrefix, body: markdown)
+
+        suppressExternalReload = true
+        presentDocument(newFull)
+        isDirty = true
+        suppressExternalReload = false
+        _ = saveNow()
+    }
+
     private func confirmAndDeleteNote() {
         let alert = NSAlert()
         alert.messageText = "Delete “\(noteTitle)”?"
@@ -660,6 +751,11 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
         suppressExternalReload = true
         presentDocument(text)
         suppressExternalReload = false
+    }
+
+    /// Soft refresh so newly synced images appear without changing text.
+    func reloadPreviewMedia() {
+        content.reloadPreviewMedia()
     }
 
     private func handleTextChange(_ text: String) {

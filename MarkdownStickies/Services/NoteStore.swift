@@ -14,8 +14,10 @@ final class NoteStore: ObservableObject {
     @Published var fuzzyMinimumScore: Double = Double(FuzzyMatch.defaultMinimumScore)
     /// Paths written from the peer on the last sync.
     @Published private(set) var syncInboundPaths: Set<String> = []
-    /// Paths we sent that the peer would accept on the last sync.
+    /// Paths we sent that the peer has not confirmed yet.
     @Published private(set) var syncOutboundPaths: Set<String> = []
+    /// Centered sync result banner (stays until dismissed or next sync).
+    @Published var syncBanner: SyncFeedback?
 
     let bookmarks: BookmarkStore
     let stateStore: NoteStateStore
@@ -104,8 +106,14 @@ final class NoteStore: ObservableObject {
             guard let self else { return [] }
             return SyncCatalogBuilder.catalog(roots: self.bookmarks.syncedURLs())
         }
-        syncService.onInboundCatalog = { [weak self] remote in
-            self?.applyRemoteCatalog(remote)
+        syncService.syncRootsProvider = { [weak self] in
+            self?.bookmarks.syncedURLs() ?? []
+        }
+        syncService.onApplyRemoteCatalog = { [weak self] remote in
+            self?.applyRemoteCatalog(remote) ?? .empty
+        }
+        syncService.onExchangeFinished = { [weak self] result, role in
+            self?.presentSyncResult(result, role: role)
         }
     }
 
@@ -131,12 +139,39 @@ final class NoteStore: ObservableObject {
         }
         windowManager.saveAllOpen()
         lastError = nil
+        syncBanner = nil
         do {
-            let remote = try await syncService.syncWithPeer()
-            applyRemoteCatalog(remote)
+            // Banner + debug log come from onExchangeFinished.
+            _ = try await syncService.syncWithPeer()
         } catch {
-            lastError = LanSyncService.friendlyNetworkError(error)
+            let message = LanSyncService.friendlyNetworkError(error)
+            let feedback = SyncFeedback(
+                kind: .failure,
+                title: "Sync failed",
+                message: message,
+                statusLine: "Sync failed — \(message)",
+                detail: String(describing: error),
+                debugCode: "sync:transport-error",
+                receivedCount: 0,
+                sentConfirmedCount: 0,
+                sentExpectedCount: 0
+            )
+            syncBanner = feedback
+            syncService.setStatus(feedback.statusLine)
+            if let dir = preferredCreateDirectory() ?? bookmarks.syncedURLs().first {
+                SyncDebugLog.appendExchange(
+                    directory: dir,
+                    deviceName: syncService.deviceName,
+                    role: .client,
+                    feedback: feedback,
+                    result: nil
+                )
+            }
         }
+    }
+
+    func dismissSyncBanner() {
+        syncBanner = nil
     }
 
     /// User opened/focused a note — drop the “received” badge (they’ve seen it).
@@ -157,11 +192,48 @@ final class NoteStore: ObservableObject {
         sortNotes()
     }
 
-    private func applyRemoteCatalog(_ remote: [SyncNotePayload]) {
+    private func presentSyncResult(_ result: SyncExchangeResult, role: SyncExchangeRole) {
+        let roots = bookmarks.syncedURLs()
+        let localPaths = SyncCatalogBuilder.pathIndex(roots: roots)
+        syncOutboundPaths = Set(
+            result.peerAppliedIDs.compactMap { localPaths[$0]?.standardizedFileURL.path }
+        )
+
+        let feedback = SyncFeedback.from(
+            result: result,
+            role: role,
+            peerName: result.peerDeviceName
+        )
+        syncBanner = feedback
+        syncService.setStatus(feedback.statusLine)
+        // Banner carries sync errors; avoid a second alert.
+        if feedback.kind == .success {
+            lastError = nil
+        }
+
+        if let dir = preferredCreateDirectory() ?? roots.first {
+            SyncDebugLog.appendExchange(
+                directory: dir,
+                deviceName: syncService.deviceName,
+                role: role,
+                feedback: feedback,
+                result: result
+            )
+            // Debug note is new/updated — refresh list so it appears.
+            rescan(restoreWindows: false)
+        }
+
+        if result.imagesReceived > 0 {
+            windowManager.reloadOpenPreviewMedia()
+        }
+    }
+
+    @discardableResult
+    private func applyRemoteCatalog(_ remote: [SyncNotePayload]) -> SyncApplyAck {
         let roots = bookmarks.syncedURLs()
         guard !roots.isEmpty else {
             lastError = "No synced folder to receive notes."
-            return
+            return SyncApplyAck(errorDescription: "No synced folder")
         }
         // Prefer the marked Default folder when it is synced; else first synced root.
         let createDir: URL = {
@@ -172,10 +244,6 @@ final class NoteStore: ObservableObject {
             return roots[0]
         }()
         do {
-            let local = SyncCatalogBuilder.catalog(roots: roots)
-            let outboundIDs = SyncMerge.outboundIDs(ours: local, theirs: remote)
-            let localPaths = SyncCatalogBuilder.pathIndex(roots: roots)
-
             let result = try SyncCatalogBuilder.applyRemoteCatalog(
                 remote,
                 roots: roots,
@@ -187,13 +255,11 @@ final class NoteStore: ObservableObject {
                 stateStore.touchLastOpened(path, at: receivedAt)
             }
             syncInboundPaths = Set(result.appliedPaths.map { $0.standardizedFileURL.path })
-            syncOutboundPaths = Set(outboundIDs.compactMap { localPaths[$0]?.standardizedFileURL.path })
             rescan(restoreWindows: false)
-            syncService.setStatus(
-                "In \(result.count) · out \(outboundIDs.count) → \(createDir.lastPathComponent)"
-            )
+            return SyncApplyAck(appliedIDs: result.appliedIDs)
         } catch {
             lastError = "Could not apply sync: \(error.localizedDescription)"
+            return SyncApplyAck(errorDescription: error.localizedDescription)
         }
     }
 

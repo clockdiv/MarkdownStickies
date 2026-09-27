@@ -24,8 +24,10 @@ final class VaultStore: ObservableObject {
     }
     /// Paths written from the peer on the last sync.
     @Published private(set) var syncInboundPaths: Set<String> = []
-    /// Paths we sent that the peer would accept on the last sync.
+    /// Paths we sent that the peer has not confirmed yet.
     @Published private(set) var syncOutboundPaths: Set<String> = []
+    /// Centered sync result banner (stays until dismissed or next sync).
+    @Published var syncBanner: SyncFeedback?
 
     let syncService: LanSyncService
 
@@ -120,8 +122,15 @@ final class VaultStore: ObservableObject {
             guard let self, let root = self.rootURL else { return [] }
             return SyncCatalogBuilder.catalog(roots: [root])
         }
-        syncService.onInboundCatalog = { [weak self] remote in
-            self?.applyRemoteCatalog(remote)
+        syncService.syncRootsProvider = { [weak self] in
+            guard let root = self?.rootURL else { return [] }
+            return [root]
+        }
+        syncService.onApplyRemoteCatalog = { [weak self] remote in
+            self?.applyRemoteCatalog(remote) ?? .empty
+        }
+        syncService.onExchangeFinished = { [weak self] result, role in
+            self?.presentSyncResult(result, role: role)
         }
     }
 
@@ -211,17 +220,41 @@ final class VaultStore: ObservableObject {
     }
 
     func syncNow() async {
-        guard rootURL != nil else {
+        guard let root = rootURL else {
             lastError = "Pick a folder before syncing."
             return
         }
         lastError = nil
+        syncBanner = nil
         do {
-            let remote = try await syncService.syncWithPeer()
-            applyRemoteCatalog(remote)
+            _ = try await syncService.syncWithPeer()
         } catch {
-            lastError = LanSyncService.friendlyNetworkError(error)
+            let message = LanSyncService.friendlyNetworkError(error)
+            let feedback = SyncFeedback(
+                kind: .failure,
+                title: "Sync failed",
+                message: message,
+                statusLine: "Sync failed — \(message)",
+                detail: String(describing: error),
+                debugCode: "sync:transport-error",
+                receivedCount: 0,
+                sentConfirmedCount: 0,
+                sentExpectedCount: 0
+            )
+            syncBanner = feedback
+            syncService.setStatus(feedback.statusLine)
+            SyncDebugLog.appendExchange(
+                directory: root,
+                deviceName: syncService.deviceName,
+                role: .client,
+                feedback: feedback,
+                result: nil
+            )
         }
+    }
+
+    func dismissSyncBanner() {
+        syncBanner = nil
     }
 
     /// User opened a note — drop the “received” badge (they’ve seen the new content).
@@ -231,13 +264,40 @@ final class VaultStore: ObservableObject {
         syncInboundPaths.remove(key)
     }
 
-    private func applyRemoteCatalog(_ remote: [SyncNotePayload]) {
+    private func presentSyncResult(_ result: SyncExchangeResult, role: SyncExchangeRole) {
         guard let root = rootURL else { return }
-        do {
-            let local = SyncCatalogBuilder.catalog(roots: [root])
-            let outboundIDs = SyncMerge.outboundIDs(ours: local, theirs: remote)
-            let localPaths = SyncCatalogBuilder.pathIndex(roots: [root])
+        let localPaths = SyncCatalogBuilder.pathIndex(roots: [root])
+        syncOutboundPaths = Set(
+            result.peerAppliedIDs.compactMap { localPaths[$0]?.standardizedFileURL.path }
+        )
 
+        let feedback = SyncFeedback.from(
+            result: result,
+            role: role,
+            peerName: result.peerDeviceName
+        )
+        syncBanner = feedback
+        syncService.setStatus(feedback.statusLine)
+        if feedback.kind == .success {
+            lastError = nil
+        }
+
+        SyncDebugLog.appendExchange(
+            directory: root,
+            deviceName: syncService.deviceName,
+            role: role,
+            feedback: feedback,
+            result: result
+        )
+        rescan()
+    }
+
+    @discardableResult
+    private func applyRemoteCatalog(_ remote: [SyncNotePayload]) -> SyncApplyAck {
+        guard let root = rootURL else {
+            return SyncApplyAck(errorDescription: "No folder")
+        }
+        do {
             let result = try SyncCatalogBuilder.applyRemoteCatalog(
                 remote,
                 roots: [root],
@@ -246,13 +306,11 @@ final class VaultStore: ObservableObject {
 
             // Replace marks from this exchange only — blues not re-sent disappear.
             syncInboundPaths = Set(result.appliedPaths.map { $0.standardizedFileURL.path })
-            syncOutboundPaths = Set(outboundIDs.compactMap { localPaths[$0]?.standardizedFileURL.path })
-            syncService.setStatus(
-                "In \(result.count) · out \(outboundIDs.count) → \(root.lastPathComponent)"
-            )
             rescan()
+            return SyncApplyAck(appliedIDs: result.appliedIDs)
         } catch {
             lastError = "Could not apply sync: \(error.localizedDescription)"
+            return SyncApplyAck(errorDescription: error.localizedDescription)
         }
     }
 

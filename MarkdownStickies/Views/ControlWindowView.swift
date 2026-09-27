@@ -23,6 +23,13 @@ struct ControlWindowView: View {
         }
         .frame(minWidth: 340, idealWidth: 380, minHeight: 460, idealHeight: 520)
         .background(Self.canvas)
+        .overlay {
+            if let banner = store.syncBanner {
+                SyncBannerOverlay(feedback: banner) {
+                    store.dismissSyncBanner()
+                }
+            }
+        }
     }
 
     private var headerBar: some View {
@@ -337,15 +344,11 @@ private struct NoteListRow: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
 
                         if wasReceived {
-                            Image(systemName: "arrow.down.circle.fill")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.green)
+                            SyncDirectionBadge(direction: .received)
                                 .help("Received from peer on last sync")
                         }
                         if wasSent {
-                            Image(systemName: "arrow.up.circle.fill")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.blue)
+                            SyncDirectionBadge(direction: .sent)
                                 .help("Sent to peer on last sync")
                         }
                     }
@@ -411,3 +414,39 @@ private enum ControlTab {
     case notes
     case settings
 }
+
+/// Compact sync direction chip: green ↓ received, blue → sent.
+private struct SyncDirectionBadge: View {
+    enum Direction {
+        case received
+        case sent
+    }
+
+    let direction: Direction
+
+    private var fill: Color {
+        switch direction {
+        case .received: return .green
+        case .sent: return .blue
+        }
+    }
+
+    private var arrow: String {
+        switch direction {
+        case .received: return "arrow.down"
+        case .sent: return "arrow.right"
+        }
+    }
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(fill)
+            Image(systemName: arrow)
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(.white)
+        }
+        .frame(width: 14, height: 14)
+    }
+}
+

@@ -39,6 +39,7 @@ public enum SyncCatalogBuilder {
         let notes = NoteScanner.scan(roots: roots)
         var byID: [UUID: SyncNotePayload] = [:]
         for note in notes {
+            guard !SyncDebugLog.isDebugNote(url: note.path) else { continue }
             guard let payload = try? payload(fromFile: note.path, titleHint: note.title, roots: roots) else {
                 continue
             }
@@ -59,6 +60,7 @@ public enum SyncCatalogBuilder {
         var index: [UUID: URL] = [:]
         var mtimes: [UUID: Date] = [:]
         for note in NoteScanner.scan(roots: roots) {
+            guard !SyncDebugLog.isDebugNote(url: note.path) else { continue }
             guard let text = try? String(contentsOf: note.path, encoding: .utf8),
                   let id = NoteFrontmatter.syncID(in: text)
             else { continue }

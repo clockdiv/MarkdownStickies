@@ -20,27 +20,140 @@ public struct SyncWireMessage: Codable, Equatable, Sendable {
     public enum Kind: String, Codable, Sendable {
         case hello
         case catalog
+        /// Receiver finished applying the peer's catalog (IDs written).
+        case applied
+        /// Metadata for note-adjacent images (protocol ≥ 3).
+        case assetOffers
+        /// One or more image payloads; empty array = end of transfer (protocol ≥ 3).
+        case assetBlobs
     }
+
+    /// Bump when the wire shape changes in a breaking way.
+    /// v2 = catalog apply ACK; v3 = post-catalog image asset exchange.
+    public static let currentProtocolVersion = 3
 
     public var kind: Kind
     public var peerID: UUID?
     public var deviceName: String?
     public var notes: [SyncNotePayload]?
+    /// Note IDs this side successfully applied from the peer's catalog.
+    public var appliedIDs: [UUID]?
+    public var protocolVersion: Int?
+    public var assetOffers: [SyncAssetOffer]?
+    public var assetBlobs: [SyncAssetBlob]?
 
-    public init(kind: Kind, peerID: UUID? = nil, deviceName: String? = nil, notes: [SyncNotePayload]? = nil) {
+    public init(
+        kind: Kind,
+        peerID: UUID? = nil,
+        deviceName: String? = nil,
+        notes: [SyncNotePayload]? = nil,
+        appliedIDs: [UUID]? = nil,
+        protocolVersion: Int? = nil,
+        assetOffers: [SyncAssetOffer]? = nil,
+        assetBlobs: [SyncAssetBlob]? = nil
+    ) {
         self.kind = kind
         self.peerID = peerID
         self.deviceName = deviceName
         self.notes = notes
+        self.appliedIDs = appliedIDs
+        self.protocolVersion = protocolVersion
+        self.assetOffers = assetOffers
+        self.assetBlobs = assetBlobs
     }
 
     public static func hello(peerID: UUID, deviceName: String) -> SyncWireMessage {
-        SyncWireMessage(kind: .hello, peerID: peerID, deviceName: deviceName)
+        SyncWireMessage(
+            kind: .hello,
+            peerID: peerID,
+            deviceName: deviceName,
+            protocolVersion: currentProtocolVersion
+        )
     }
 
-    public static func catalog(_ notes: [SyncNotePayload]) -> SyncWireMessage {
-        SyncWireMessage(kind: .catalog, notes: notes)
+    public static func catalog(
+        _ notes: [SyncNotePayload],
+        appliedIDs: [UUID] = [],
+        deviceName: String? = nil
+    ) -> SyncWireMessage {
+        SyncWireMessage(
+            kind: .catalog,
+            deviceName: deviceName,
+            notes: notes,
+            appliedIDs: appliedIDs,
+            protocolVersion: currentProtocolVersion
+        )
     }
+
+    public static func applied(_ ids: [UUID]) -> SyncWireMessage {
+        SyncWireMessage(kind: .applied, appliedIDs: ids)
+    }
+
+    public static func assetOffers(_ offers: [SyncAssetOffer]) -> SyncWireMessage {
+        SyncWireMessage(kind: .assetOffers, assetOffers: offers)
+    }
+
+    public static func assetBlobs(_ blobs: [SyncAssetBlob]) -> SyncWireMessage {
+        SyncWireMessage(kind: .assetBlobs, assetBlobs: blobs)
+    }
+}
+
+/// Result of applying a remote catalog (returned to the sync engine for ACKs).
+public struct SyncApplyAck: Equatable, Sendable {
+    public var appliedIDs: [UUID]
+    public var errorDescription: String?
+
+    public init(appliedIDs: [UUID] = [], errorDescription: String? = nil) {
+        self.appliedIDs = appliedIDs
+        self.errorDescription = errorDescription
+    }
+
+    public static let empty = SyncApplyAck()
+}
+
+/// Full sync exchange including peer confirmation of our outbound notes.
+public struct SyncExchangeResult: Equatable, Sendable {
+    public var remoteNotes: [SyncNotePayload]
+    /// Notes the peer confirmed it wrote from our catalog this session.
+    public var peerAppliedIDs: [UUID]
+    /// Notes we wrote from the peer's catalog this session.
+    public var localAppliedIDs: [UUID]
+    /// Notes we still have that the peer would still accept after this exchange (should be empty).
+    public var remainingOutboundIDs: [UUID]
+    public var peerSupportsAck: Bool
+    /// Peer display name when known (from hello / catalog).
+    public var peerDeviceName: String?
+    /// Images written from peer blobs this session (protocol ≥ 3).
+    public var imagesReceived: Int
+    /// Images we sent to the peer this session (protocol ≥ 3).
+    public var imagesSent: Int
+
+    public init(
+        remoteNotes: [SyncNotePayload],
+        peerAppliedIDs: [UUID],
+        localAppliedIDs: [UUID],
+        remainingOutboundIDs: [UUID],
+        peerSupportsAck: Bool,
+        peerDeviceName: String? = nil,
+        imagesReceived: Int = 0,
+        imagesSent: Int = 0
+    ) {
+        self.remoteNotes = remoteNotes
+        self.peerAppliedIDs = peerAppliedIDs
+        self.localAppliedIDs = localAppliedIDs
+        self.remainingOutboundIDs = remainingOutboundIDs
+        self.peerSupportsAck = peerSupportsAck
+        self.peerDeviceName = peerDeviceName
+        self.imagesReceived = imagesReceived
+        self.imagesSent = imagesSent
+    }
+
+    /// True when the peer no longer needs any of our notes (or we cannot tell without ACK).
+    public var peerConfirmedOutbound: Bool {
+        remainingOutboundIDs.isEmpty
+    }
+
+    public var unconfirmedOutboundIDs: [UUID] { remainingOutboundIDs }
 }
 
 public enum SyncMerge {
