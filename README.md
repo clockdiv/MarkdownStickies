@@ -9,9 +9,8 @@ macOS sticky notes for plain `.md` files, plus a native iOS companion (same repo
 | **MarkdownStickies** | macOS 14+ | Desktop stickies + overview |
 | **MarkdownStickiesIOS** | iOS 17+ | Flat list / search / editor over a picked folder |
 | **MarkdownStickiesCore** | SPM (macOS + iOS) | Shared note/filename/fuzzy/frontmatter/LAN sync |
-| **MarkdownStickiesTests** | macOS | Unit tests for Core types |
 
-Open `MarkdownStickies.xcodeproj` and pick the Mac or iOS scheme.
+Open `MarkdownStickies.xcodeproj` and pick the Mac or iOS scheme. Package unit tests live under `MarkdownStickiesCore/Tests`.
 
 ## LAN sync (v1)
 

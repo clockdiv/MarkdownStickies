@@ -29,17 +29,6 @@
       shouldUseLaunchSchemeArgsEnv = "YES"
       shouldAutocreateTestPlan = "YES">
       <Testables>
-         <TestableReference
-            skipped = "NO"
-            parallelizable = "YES">
-            <BuildableReference
-               BuildableIdentifier = "primary"
-               BlueprintIdentifier = "F20000000000000000000001"
-               BuildableName = "MarkdownStickiesTests.xctest"
-               BlueprintName = "MarkdownStickiesTests"
-               ReferencedContainer = "container:MarkdownStickies.xcodeproj">
-            </BuildableReference>
-         </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction
