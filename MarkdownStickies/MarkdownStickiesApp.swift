@@ -39,6 +39,16 @@ struct MarkdownStickiesApp: App {
                 }
                 .keyboardShortcut("s", modifiers: [.command, .shift])
             }
+
+            CommandMenu("Sets") {
+                ForEach(0..<NoteWindowState.setCount, id: \.self) { index in
+                    Button("Set \(index)") {
+                        store.switchToSet(index)
+                    }
+                    .keyboardShortcut(KeyEquivalent(Character("\(index)")), modifiers: [.command])
+                    .disabled(store.stateStore.activeSet == index)
+                }
+            }
         }
     }
 }

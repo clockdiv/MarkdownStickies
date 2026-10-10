@@ -7,13 +7,15 @@ enum MarkdownHTMLRenderer {
         backgroundHex: String,
         noteDirectory: URL? = nil,
         fontSize: Double = 11,
-        columnCount: Int = 1
+        columnCount: Int = 1,
+        editable: Bool = true
     ) -> String {
         let columns = NoteWindowState.clampedColumnCount(columnCount)
+        let editingIndex = editable ? activeIndex : nil
         var body = ""
         for (index, block) in blocks.enumerated() {
             let isBlank = block.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            if index == activeIndex {
+            if index == editingIndex {
                 let escaped = escapeHTML(block.source)
                 let kind = activeSourceKind(block.source)
                 body += """
@@ -33,11 +35,17 @@ enum MarkdownHTMLRenderer {
         }
 
         if body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            body = """
-            <div class="block active" data-index="0">
-              <textarea class="source para" rows="1"></textarea>
-            </div>
-            """
+            if editable {
+                body = """
+                <div class="block active" data-index="0">
+                  <textarea class="source para" rows="1"></textarea>
+                </div>
+                """
+            } else {
+                body = """
+                <div class="block blank" data-index="0"><p class="blank-line"><br></p></div>
+                """
+            }
         }
 
         let multiColumn = columns > 1
@@ -124,7 +132,8 @@ enum MarkdownHTMLRenderer {
             -webkit-column-break-inside: avoid;
             page-break-inside: avoid;
           }
-          .block:hover { background: rgba(0,0,0,0.03); }
+          .block:hover { background: \(editable ? "rgba(0,0,0,0.03)" : "transparent"); }
+          \(editable ? "" : ".block { cursor: default; } .tail { display: none; }")
           .block.blank {
             margin: 0;
             min-height: 1.45em;
@@ -284,8 +293,18 @@ enum MarkdownHTMLRenderer {
         <div class="tail" data-tail="1"></div>
         <script>
           (function() {
+            var MS_EDITABLE = \(editable ? "true" : "false");
             function post(name, payload) {
               try { webkit.messageHandlers[name].postMessage(payload); } catch (e) {}
+            }
+            if (!MS_EDITABLE) {
+              document.querySelectorAll('a[href]').forEach(function(a) {
+                a.addEventListener('click', function(ev) {
+                  ev.preventDefault();
+                  post('openURL', { url: a.href });
+                });
+              });
+              return;
             }
             function autoGrow(ta) {
               // Collapse first so scrollHeight is content height, not the default

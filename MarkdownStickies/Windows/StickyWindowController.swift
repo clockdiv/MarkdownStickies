@@ -8,13 +8,17 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
     private let panel: StickyPanel
     private let rootView: NSView
     private let titlebar: StickyTitlebarView
-    private let content: LivePreviewView
+    private let content: NSView & StickyNoteEditorBody
     private var colorMenu: NSMenu?
     private weak var manager: StickyWindowManager?
 
     private(set) var draftText: String
     private var isDirty = false
     private var saveTask: Task<Void, Never>?
+    /// Serializes note file writes off the main thread (avoids UI stalls on large notes).
+    private static let fileSaveQueue = DispatchQueue(label: "MarkdownStickies.noteSave")
+    /// Bumped on every saveNow so a stale background write can't clear newer dirty state.
+    private var saveGeneration = 0
     private var suppressExternalReload = false
     /// When false, the editor hides the YAML frontmatter block.
     private var showFrontmatter = false
@@ -34,11 +38,19 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
     private var colorSwatchButtons: [StickyColor: NSButton] = [:]
     private var colorPickerButton: NSButton?
     private var isPickingCustomColor = false
+    private var sourceEditor: MarkdownSourceEditorView {
+        content as! MarkdownSourceEditorView
+    }
     private var isCollapsed = false
     private var expandedFrame: NSRect?
     private let normalMinSize = NSSize(width: 180, height: 140)
     private let collapsedHeight: CGFloat = 28
     private var htmlConvertWindow: HTMLConvertWindowController?
+    /// Body vertical pins — deactivated while collapsed so Auto Layout can’t fight the titlebar-only height.
+    private var bodyTopConstraint: NSLayoutConstraint?
+    private var bodyBottomConstraint: NSLayoutConstraint?
+    /// Prevents `windowDidResize` ↔ `setFrame` recursion (collapse animation / height lock).
+    private var isApplyingPanelFrame = false
 
     init(
         note: Note,
@@ -90,7 +102,7 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
         titlebar.noteTitle = note.title
         titlebar.applyBackground(bg)
 
-        let body = LivePreviewView(
+        let body = MarkdownSourceEditorView(
             noteURL: note.path,
             text: parts.body,
             background: bg,
@@ -101,16 +113,22 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
 
         root.addSubview(titlebar)
         root.addSubview(body)
+        let bodyTop = body.topAnchor.constraint(equalTo: titlebar.bottomAnchor)
+        let bodyBottom = body.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -8)
+        bodyTopConstraint = bodyTop
+        bodyBottomConstraint = bodyBottom
         NSLayoutConstraint.activate([
             titlebar.topAnchor.constraint(equalTo: root.topAnchor),
             titlebar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             titlebar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             titlebar.heightAnchor.constraint(equalToConstant: collapsedHeight),
 
-            body.topAnchor.constraint(equalTo: titlebar.bottomAnchor),
-            body.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            body.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            body.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            // Keep root chrome at the sides/bottom so the borderless window’s
+            // resize hot-edge isn’t under the editor (I-beam ↔ resize flicker).
+            bodyTop,
+            body.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
+            body.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
+            bodyBottom,
         ])
 
         panel.contentView = root
@@ -123,6 +141,9 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
 
         body.onTextChange = { [weak self] text in
             self?.handleTextChange(text)
+        }
+        body.onTypingActivity = { [weak self] in
+            self?.markTypingActivity()
         }
         body.onRequestImmediateSave = { [weak self] in
             _ = self?.saveNow()
@@ -390,8 +411,7 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
     }
 
     private func makeActionsMenuView() -> NSView {
-        // Match color-row width so the four icons sit evenly across the menu.
-        let width: CGFloat = 200
+        let width: CGFloat = 230
         let height: CGFloat = 36
         let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
 
@@ -418,6 +438,11 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
             accessibilityLabel: "Show Frontmatter",
             action: #selector(toggleFrontmatterPressed(_:))
         )
+        let tableBtn = makeActionIconButton(
+            systemName: "tablecells",
+            accessibilityLabel: "Edit Table",
+            action: #selector(editTablePressed(_:))
+        )
         let deleteBtn = makeActionIconButton(
             systemName: "trash",
             accessibilityLabel: "Delete Note",
@@ -425,7 +450,9 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
         )
         deleteBtn.contentTintColor = .systemRed
 
-        for btn in [floatBtn, finderBtn, frontmatterBtn, deleteBtn] {
+        let buttons: [NSButton] = [floatBtn, finderBtn, frontmatterBtn, tableBtn, deleteBtn]
+
+        for btn in buttons {
             stack.addArrangedSubview(btn)
             btn.widthAnchor.constraint(equalToConstant: 28).isActive = true
             btn.heightAnchor.constraint(equalToConstant: 28).isActive = true
@@ -562,7 +589,6 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
     @objc private func toggleFloatOnTop(_ sender: Any?) {
         handleFloatChange(!floatOnTop)
         syncColorMenu()
-        // Keep menu open isn't needed; dismiss happens naturally for view buttons sometimes.
         colorMenu?.cancelTracking()
     }
 
@@ -579,6 +605,11 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
         suppressExternalReload = false
         updateFrontmatterButtonAppearance()
         // Keep menu open feel: rebuild isn't needed; just refresh tint next open.
+    }
+
+    @objc private func editTablePressed(_ sender: Any?) {
+        colorMenu?.cancelTracking()
+        sourceEditor.presentTableEditor()
     }
 
     @objc private func deleteNotePressed(_ sender: Any?) {
@@ -663,6 +694,28 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
         }
     }
 
+    /// Bring back a hibernated sticky without stealing key focus (set restore).
+    func wake(makeKey: Bool) {
+        if makeKey {
+            panel.makeKeyAndOrderFront(nil)
+            DispatchQueue.main.async { [weak self] in
+                self?.content.focusEditor()
+            }
+        } else {
+            panel.orderFront(nil)
+        }
+    }
+
+    /// Hide for set-switch without destroying the editor (keeps TextKit/WebKit warm).
+    func hibernate() {
+        detachColorPanelIfNeeded()
+        content.flushPendingPublish()
+        if isDirty {
+            saveNow()
+        }
+        panel.orderOut(nil)
+    }
+
     func orderFront() {
         panel.orderFront(nil)
     }
@@ -710,26 +763,33 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
         guard !isCollapsed else { return }
         expandedFrame = panel.frame
         isCollapsed = true
+        content.isHidden = true
+        // Drop vertical body pins first — otherwise Auto Layout tries to grow the
+        // window back to fit the editor and recurses through windowDidResize.
+        bodyTopConstraint?.isActive = false
+        bodyBottomConstraint?.isActive = false
         let frame = panel.frame
         let newHeight = collapsedHeight
         let newY = frame.origin.y + frame.height - newHeight
         panel.minSize = NSSize(width: normalMinSize.width, height: newHeight)
-        panel.setFrame(
+        applyPanelFrame(
             NSRect(x: frame.origin.x, y: newY, width: frame.width, height: newHeight),
-            display: true,
             animate: true
         )
-        content.isHidden = true
     }
 
     private func expandFromTitlebar() {
         guard isCollapsed, let expanded = expandedFrame else {
             isCollapsed = false
+            bodyTopConstraint?.isActive = true
+            bodyBottomConstraint?.isActive = true
             content.isHidden = false
             panel.minSize = normalMinSize
             return
         }
         isCollapsed = false
+        bodyTopConstraint?.isActive = true
+        bodyBottomConstraint?.isActive = true
         content.isHidden = false
         panel.minSize = normalMinSize
         // Keep current top-left; restore height/width from before collapse.
@@ -742,20 +802,45 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
             height: max(expanded.height, normalMinSize.height)
         )
         expandedFrame = nil
-        panel.setFrame(restored, display: true, animate: true)
+        applyPanelFrame(restored, animate: true)
         manager?.stickyFrameChanged(path: notePath, frame: restored)
     }
 
+    private func applyPanelFrame(_ frame: NSRect, animate: Bool) {
+        isApplyingPanelFrame = true
+        defer { isApplyingPanelFrame = false }
+        panel.setFrame(frame, display: true, animate: animate)
+    }
+
     func applyExternalContent(_ text: String) {
-        guard !isDirty else { return }
+        // Refuse while the user is typing — including the debounce window before isDirty flips.
+        guard !isDirty, !content.hasUnpublishedEdits else { return }
         suppressExternalReload = true
         presentDocument(text)
+        suppressExternalReload = false
+    }
+
+    /// Conflict merge / authority write: always replace the editor and kill in-flight saves
+    /// so a stale debounce cannot overwrite `conflict_resolved` on disk before sync.
+    func forceApplyExternalContent(_ text: String) {
+        saveTask?.cancel()
+        saveGeneration += 1
+        suppressExternalReload = true
+        presentDocument(text)
+        draftText = text
+        isDirty = false
         suppressExternalReload = false
     }
 
     /// Soft refresh so newly synced images appear without changing text.
     func reloadPreviewMedia() {
         content.reloadPreviewMedia()
+    }
+
+    private func markTypingActivity() {
+        guard !suppressExternalReload else { return }
+        isDirty = true
+        scheduleSave()
     }
 
     private func handleTextChange(_ text: String) {
@@ -826,7 +911,7 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
     private func scheduleSave() {
         saveTask?.cancel()
         saveTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 400_000_000)
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
             guard !Task.isCancelled else { return }
             saveNow()
         }
@@ -834,23 +919,55 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
 
     @discardableResult
     func saveNow() -> Bool {
+        content.flushPendingPublish()
         saveTask?.cancel()
         let full = fullDocumentMarkdown
         draftText = full
         guard isDirty else { return true }
-        do {
-            try full.write(to: notePath, atomically: true, encoding: .utf8)
-            isDirty = false
-            // If frontmatter was visible and edited, refresh cached prefix.
-            if showFrontmatter {
-                frontmatterPrefix = NoteFrontmatter.splitDocument(full).prefix
-            }
-            let values = try notePath.resourceValues(forKeys: [.contentModificationDateKey])
-            manager?.noteDidSave(path: notePath, modifiedAt: values.contentModificationDate ?? Date())
-            return true
-        } catch {
-            return false
+        if showFrontmatter {
+            frontmatterPrefix = NoteFrontmatter.splitDocument(full).prefix
         }
+        saveGeneration += 1
+        let generation = saveGeneration
+        let path = notePath
+        let text = full
+        // Keep isDirty true until this write finishes — blocks disk reloads mid-flight.
+        // Mark before the write so FSEvents during IO are ignored.
+        manager?.noteDidSave(path: path, modifiedAt: Date())
+        Self.fileSaveQueue.async { [weak self] in
+            // Latest-wins: a merge/force reload bumps saveGeneration — never let a stale
+            // debounce write wipe conflict_resolved (that left merges on Mac only).
+            let stillCurrent = DispatchQueue.main.sync {
+                guard let self else { return false }
+                return generation == self.saveGeneration
+            }
+            guard stillCurrent else { return }
+            do {
+                try text.write(to: path, atomically: true, encoding: .utf8)
+                let values = try path.resourceValues(forKeys: [.contentModificationDateKey])
+                let modified = values.contentModificationDate ?? Date()
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.manager?.noteDidSave(path: path, modifiedAt: modified)
+                    guard generation == self.saveGeneration else { return }
+                    // More keystrokes landed while we wrote — schedule another save.
+                    if self.content.hasUnpublishedEdits || self.fullDocumentMarkdown != text {
+                        self.isDirty = true
+                        self.scheduleSave()
+                        return
+                    }
+                    self.isDirty = false
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if generation == self.saveGeneration {
+                        self.isDirty = true
+                    }
+                }
+            }
+        }
+        return true
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -885,14 +1002,17 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
     }
 
     func windowDidResize(_ notification: Notification) {
+        // Mid-animation / programmatic setFrame — do not re-enter.
+        guard !isApplyingPanelFrame else { return }
+
         if isCollapsed {
             // Keep collapsed height locked if the user drags an edge.
             let frame = panel.frame
             if abs(frame.height - collapsedHeight) > 0.5 {
                 let newY = frame.origin.y + frame.height - collapsedHeight
-                panel.setFrame(
+                applyPanelFrame(
                     NSRect(x: frame.origin.x, y: newY, width: frame.width, height: collapsedHeight),
-                    display: true
+                    animate: false
                 )
             }
             if var expanded = expandedFrame {

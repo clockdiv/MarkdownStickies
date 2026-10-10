@@ -11,7 +11,7 @@ public enum SyncCatalogBuilder {
 
         let raw = try String(contentsOf: url, encoding: .utf8)
         let ensured = NoteFrontmatter.ensuringSyncID(raw)
-        var text = ensured.markdown
+        let text = ensured.markdown
 
         if ensured.didChange {
             try text.write(to: url, atomically: true, encoding: .utf8)
@@ -33,14 +33,32 @@ public enum SyncCatalogBuilder {
         )
     }
 
-    /// Index payloads for every `.md` under `roots` (skips files that cannot be read).
-    /// If two files share an `id`, keeps the newer mtime (one payload per id).
-    public static func catalog(roots: [URL]) -> [SyncNotePayload] {
-        let notes = NoteScanner.scan(roots: roots)
+    /// Wire catalog: active notes only. Trash and conflict siblings never leave this device.
+    public static func catalog(roots: [URL], config: ScanConfig = .empty) -> [SyncNotePayload] {
+        payloadsOnDisk(roots: roots, config: config, includeTrash: false)
+    }
+
+    /// Local decide/apply index — includes Trash so a locally trashed note is not resurrected.
+    public static func localIndexForApply(roots: [URL], config: ScanConfig = .empty) -> [SyncNotePayload] {
+        payloadsOnDisk(roots: roots, config: config, includeTrash: true)
+    }
+
+    private static func payloadsOnDisk(
+        roots: [URL],
+        config: ScanConfig,
+        includeTrash: Bool
+    ) -> [SyncNotePayload] {
+        let notes = NoteScanner.scan(roots: roots, config: config)
         var byID: [UUID: SyncNotePayload] = [:]
         for note in notes {
             guard !SyncDebugLog.isDebugNote(url: note.path) else { continue }
+            if !includeTrash, NoteFrontmatter.isTrashed(file: note.path) { continue }
             guard let payload = try? payload(fromFile: note.path, titleHint: note.title, roots: roots) else {
+                continue
+            }
+            // Keep-both siblings stay on the merge Mac only.
+            if NoteFrontmatter.isConflictSibling(payload.body) { continue }
+            if !includeTrash, NoteFrontmatter.isTrashFolder(NoteFrontmatter.folder(in: payload.body)) {
                 continue
             }
             if let existing = byID[payload.id] {
@@ -56,10 +74,10 @@ public enum SyncCatalogBuilder {
 
     /// Map sync IDs → file URLs for notes under `roots`.
     /// Duplicate ids keep the newer file’s path.
-    public static func pathIndex(roots: [URL]) -> [UUID: URL] {
+    public static func pathIndex(roots: [URL], config: ScanConfig = .empty) -> [UUID: URL] {
         var index: [UUID: URL] = [:]
         var mtimes: [UUID: Date] = [:]
-        for note in NoteScanner.scan(roots: roots) {
+        for note in NoteScanner.scan(roots: roots, config: config) {
             guard !SyncDebugLog.isDebugNote(url: note.path) else { continue }
             guard let text = try? String(contentsOf: note.path, encoding: .utf8),
                   let id = NoteFrontmatter.syncID(in: text)
@@ -173,26 +191,44 @@ public enum SyncCatalogBuilder {
     public struct ApplyResult: Equatable, Sendable {
         public var appliedIDs: [UUID]
         public var appliedPaths: [URL]
+        public var conflicts: [SyncConflict]
+        public var awaitingAuthorityMerge: [SyncConflict]
 
         public var count: Int { appliedIDs.count }
 
-        public init(appliedIDs: [UUID] = [], appliedPaths: [URL] = []) {
+        public init(
+            appliedIDs: [UUID] = [],
+            appliedPaths: [URL] = [],
+            conflicts: [SyncConflict] = [],
+            awaitingAuthorityMerge: [SyncConflict] = []
+        ) {
             self.appliedIDs = appliedIDs
             self.appliedPaths = appliedPaths
+            self.conflicts = conflicts
+            self.awaitingAuthorityMerge = awaitingAuthorityMerge
         }
     }
 
     /// Apply merge decisions for a remote catalog.
     /// Renames use a two-phase move so A↔B filename swaps cannot collide mid-apply.
+    /// On the merge authority (Mac), divergent bodies keep both (sibling for merge UI).
+    /// On a satellite (iOS), divergent bodies keep local only — Mac merges later.
     @discardableResult
     public static func applyRemoteCatalog(
         _ remote: [SyncNotePayload],
         roots: [URL],
-        createDirectory: URL
+        createDirectory: URL,
+        peerLabel: String? = nil,
+        conflictRole: SyncMerge.ConflictRole = .mergeAuthority
     ) throws -> ApplyResult {
-        let localCatalog = catalog(roots: roots)
-        let localByID = Dictionary(uniqueKeysWithValues: localCatalog.map { ($0.id, $0) })
+        let label = normalizedPeerLabel(peerLabel)
+        let localByID = Dictionary(
+            uniqueKeysWithValues: localIndexForApply(roots: roots).map { ($0.id, $0) }
+        )
         let paths = pathIndex(roots: roots)
+        // Include keep-both siblings so re-sync does not mint duplicates (they are omitted
+        // from `catalog` / wire payloads on purpose).
+        var localFingerprints = contentFingerprintsOnDisk(roots: roots)
 
         struct Planned {
             let payload: SyncNotePayload
@@ -201,18 +237,65 @@ public enum SyncCatalogBuilder {
         }
 
         var planned: [Planned] = []
-        for decision in SyncMerge.decisions(localByID: localByID, remote: remote) {
-            guard case .applyRemote(let payload) = decision else { continue }
-            let existing = paths[payload.id]
-            planned.append(Planned(
-                payload: payload,
-                existingPath: existing,
-                localBody: existing.flatMap { try? String(contentsOf: $0, encoding: .utf8) }
-            ))
-        }
-        guard !planned.isEmpty else { return ApplyResult() }
+        var conflicts: [SyncConflict] = []
+        var awaitingAuthorityMerge: [SyncConflict] = []
 
-        // Title-only applies rename the existing path (never create a second file for the id).
+        // Trash never syncs — ignore peer trash payloads entirely.
+        let remoteActive = remote.filter {
+            !NoteFrontmatter.isTrashFolder(NoteFrontmatter.folder(in: $0.body))
+        }
+
+        for decision in SyncMerge.decisions(localByID: localByID, remote: remoteActive) {
+            switch decision {
+            case .keepLocal:
+                continue
+            case .applyRemote(let payload):
+                let existing = paths[payload.id]
+                planned.append(Planned(
+                    payload: payload,
+                    existingPath: existing,
+                    localBody: existing.flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+                ))
+            case .conflict(let local, let remotePayload):
+                switch conflictRole {
+                case .satellite:
+                    // Keep local only — do not ACK as "written" (avoids inflated sent counts).
+                    awaitingAuthorityMerge.append(
+                        SyncConflict(
+                            id: local.id,
+                            local: local,
+                            remote: remotePayload,
+                            remoteCopyID: remotePayload.id,
+                            remoteCopyPath: nil,
+                            peerLabel: label
+                        )
+                    )
+                case .mergeAuthority:
+                    // Always surface a conflict for UI — even if the peer body is already on
+                    // disk as a keep-both sibling. Skipping that made Mac say “Synced” while
+                    // iOS correctly said “Waiting for Mac”.
+                    let conflict = try preserveConflict(
+                        local: local,
+                        remote: remotePayload,
+                        roots: roots,
+                        localFingerprints: &localFingerprints,
+                        createDirectory: createDirectory,
+                        peerLabel: label
+                    )
+                    conflicts.append(conflict)
+                    // Sibling is local-only (conflict_sibling) — do not ACK as received/sent.
+                }
+            }
+        }
+
+        if planned.isEmpty {
+            return ApplyResult(
+                appliedIDs: [],
+                appliedPaths: [],
+                conflicts: conflicts,
+                awaitingAuthorityMerge: awaitingAuthorityMerge
+            )
+        }
 
         let fm = FileManager.default
 
@@ -303,7 +386,106 @@ public enum SyncCatalogBuilder {
             }
         }
 
-        return ApplyResult(appliedIDs: appliedIDs, appliedPaths: appliedPaths)
+        return ApplyResult(
+            appliedIDs: appliedIDs,
+            appliedPaths: appliedPaths,
+            conflicts: conflicts,
+            awaitingAuthorityMerge: awaitingAuthorityMerge
+        )
+    }
+
+    /// Fingerprints of every on-disk note under `roots`, including local-only conflict siblings.
+    private static func contentFingerprintsOnDisk(roots: [URL]) -> Set<String> {
+        var fingerprints = Set<String>()
+        for note in NoteScanner.scan(roots: roots) {
+            guard !SyncDebugLog.isDebugNote(url: note.path) else { continue }
+            guard let text = try? String(contentsOf: note.path, encoding: .utf8) else { continue }
+            fingerprints.insert(NoteFrontmatter.contentFingerprint(text))
+        }
+        return fingerprints
+    }
+
+    /// Keep local; ensure remote body exists as a local-only sibling for merge UI.
+    /// Always returns a conflict — reuses an existing sibling when the fingerprint is already present.
+    private static func preserveConflict(
+        local: SyncNotePayload,
+        remote: SyncNotePayload,
+        roots: [URL],
+        localFingerprints: inout Set<String>,
+        createDirectory: URL,
+        peerLabel: String
+    ) throws -> SyncConflict {
+        let remoteFingerprint = NoteFrontmatter.contentFingerprint(remote.body)
+        if localFingerprints.contains(remoteFingerprint),
+           let existing = findSiblingFile(
+            matchingFingerprint: remoteFingerprint,
+            primaryID: local.id,
+            roots: roots
+           ) {
+            let text = (try? String(contentsOf: existing, encoding: .utf8)) ?? remote.body
+            let copyID = NoteFrontmatter.syncID(in: text) ?? remote.id
+            return SyncConflict(
+                id: local.id,
+                local: local,
+                remote: remote,
+                remoteCopyID: copyID,
+                remoteCopyPath: existing,
+                peerLabel: peerLabel
+            )
+        }
+
+        let newID = UUID()
+        let siblingTitle = "\(remote.title) (from \(peerLabel))"
+        var siblingBody = NoteFrontmatter.settingSyncID(newID, in: remote.body)
+        siblingBody = NoteFrontmatter.markingConflictSibling(local.id, in: siblingBody)
+        let sibling = SyncNotePayload(
+            id: newID,
+            title: siblingTitle,
+            modifiedAt: remote.modifiedAt,
+            body: siblingBody
+        )
+        let path = try writeBody(sibling, existingPath: nil, createDirectory: createDirectory)
+        let final = try finalizeRename(
+            from: path,
+            namingSource: path,
+            title: siblingTitle,
+            modifiedAt: remote.modifiedAt,
+            ignoringOccupiedPaths: []
+        )
+        localFingerprints.insert(NoteFrontmatter.contentFingerprint(siblingBody))
+        return SyncConflict(
+            id: local.id,
+            local: local,
+            remote: remote,
+            remoteCopyID: newID,
+            remoteCopyPath: final,
+            peerLabel: peerLabel
+        )
+    }
+
+    /// Locate an on-disk keep-both copy of `fingerprint` (prefer marked conflict siblings).
+    private static func findSiblingFile(
+        matchingFingerprint fingerprint: String,
+        primaryID: UUID,
+        roots: [URL]
+    ) -> URL? {
+        var fallback: URL?
+        for note in NoteScanner.scan(roots: roots) {
+            guard !SyncDebugLog.isDebugNote(url: note.path) else { continue }
+            guard let text = try? String(contentsOf: note.path, encoding: .utf8) else { continue }
+            guard NoteFrontmatter.contentFingerprint(text) == fingerprint else { continue }
+            if let id = NoteFrontmatter.syncID(in: text), id == primaryID { continue }
+            if NoteFrontmatter.isConflictSibling(text) {
+                return note.path.standardizedFileURL
+            }
+            fallback = note.path.standardizedFileURL
+        }
+        return fallback
+    }
+
+    private static func normalizedPeerLabel(_ raw: String?) -> String {
+        let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "peer" : trimmed
     }
 
     // MARK: - Private

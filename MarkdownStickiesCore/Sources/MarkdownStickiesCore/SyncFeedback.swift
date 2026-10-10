@@ -1,8 +1,10 @@
 import Foundation
 
-/// User-facing sync outcome (banner + persistent status + debug log).
+/// User-facing sync outcome / live progress (banner + persistent status + debug log).
 public struct SyncFeedback: Equatable, Sendable {
     public enum Kind: String, Sendable {
+        /// In-flight sync — green card, no OK until terminal.
+        case progress
         case success
         case failure
         case warning
@@ -23,6 +25,14 @@ public struct SyncFeedback: Equatable, Sendable {
     public var sentConfirmedCount: Int
     public var sentExpectedCount: Int
     public var peerName: String?
+    /// When progress started (for wait timer).
+    public var startedAt: Date?
+    /// Browse / connect timeout in seconds (shown while waiting).
+    public var timeoutSeconds: Int?
+    /// Note title or image filename currently transferring.
+    public var currentItem: String?
+
+    public var isTerminal: Bool { kind != .progress }
 
     public init(
         kind: Kind,
@@ -34,7 +44,10 @@ public struct SyncFeedback: Equatable, Sendable {
         receivedCount: Int,
         sentConfirmedCount: Int,
         sentExpectedCount: Int,
-        peerName: String? = nil
+        peerName: String? = nil,
+        startedAt: Date? = nil,
+        timeoutSeconds: Int? = nil,
+        currentItem: String? = nil
     ) {
         self.kind = kind
         self.title = title
@@ -46,6 +59,41 @@ public struct SyncFeedback: Equatable, Sendable {
         self.sentConfirmedCount = sentConfirmedCount
         self.sentExpectedCount = sentExpectedCount
         self.peerName = peerName
+        self.startedAt = startedAt
+        self.timeoutSeconds = timeoutSeconds
+        self.currentItem = currentItem
+    }
+
+    public static func progress(
+        title: String,
+        message: String,
+        startedAt: Date,
+        timeoutSeconds: Int? = nil,
+        currentItem: String? = nil,
+        peerName: String? = nil,
+        debugCode: String = "sync:progress"
+    ) -> SyncFeedback {
+        let status: String
+        if let currentItem, !currentItem.isEmpty {
+            status = "\(message) — \(currentItem)"
+        } else {
+            status = message
+        }
+        return SyncFeedback(
+            kind: .progress,
+            title: title,
+            message: message,
+            statusLine: status,
+            detail: nil,
+            debugCode: debugCode,
+            receivedCount: 0,
+            sentConfirmedCount: 0,
+            sentExpectedCount: 0,
+            peerName: peerName,
+            startedAt: startedAt,
+            timeoutSeconds: timeoutSeconds,
+            currentItem: currentItem
+        )
     }
 
     public static func from(
@@ -70,11 +118,52 @@ public struct SyncFeedback: Equatable, Sendable {
         }
 
         let peer = peerName?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let peerLabel = (peer?.isEmpty == false) ? peer! : "peer"
+        var peerLabel = (peer?.isEmpty == false) ? peer! : "peer"
+        // Avoid "sent to to iPhone" when a device name already starts with "to ".
+        if peerLabel.lowercased().hasPrefix("to ") {
+            peerLabel = String(peerLabel.dropFirst(3))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if peerLabel.isEmpty { peerLabel = "peer" }
+        }
         let received = result.localAppliedIDs.count
         // Trust the peer's apply ACK for "sent" — not a prediction against their post-apply catalog.
         let sent = result.peerAppliedIDs.count
         let remaining = result.remainingOutboundIDs.count
+        let conflictCount = result.conflicts.count
+        let awaitingCount = result.awaitingAuthorityMerge.count
+
+        if conflictCount > 0 {
+            let noun = conflictCount == 1 ? "note" : "notes"
+            return SyncFeedback(
+                kind: .warning,
+                title: conflictCount == 1 ? "Sync conflict" : "Sync conflicts",
+                message: "Kept both copies for \(conflictCount) conflicting \(noun). Review to merge or keep both.",
+                statusLine: "Synced with conflicts — kept both for \(conflictCount) \(noun)",
+                // Detail stays in the debug log only — don't dump MSSync into the banner.
+                detail: nil,
+                debugCode: "sync:conflicts",
+                receivedCount: received,
+                sentConfirmedCount: sent,
+                sentExpectedCount: sent,
+                peerName: peer
+            )
+        }
+
+        if awaitingCount > 0 {
+            let noun = awaitingCount == 1 ? "note" : "notes"
+            return SyncFeedback(
+                kind: .warning,
+                title: "Awaiting Merge",
+                message: "\(awaitingCount) \(noun) need a merge on the Mac. Sync Later cancels on both devices and leaves notes unchanged.",
+                statusLine: "Synced — awaiting Mac merge for \(awaitingCount) \(noun)",
+                detail: nil,
+                debugCode: "sync:await-mac-merge",
+                receivedCount: received,
+                sentConfirmedCount: sent,
+                sentExpectedCount: sent,
+                peerName: peer
+            )
+        }
 
         if !result.peerSupportsAck, sent > 0 || remaining > 0 || received > 0 {
             // Older peer: we may still have applied notes locally.
@@ -136,18 +225,18 @@ public struct SyncFeedback: Equatable, Sendable {
         } else if received == 0, sent == 0 {
             message = "Notes up to date with \(peerLabel)" + imageSuffix
         } else if received > 0, sent > 0 {
-            message = "Received \(received) · sent \(sent) to \(peerLabel)" + imageSuffix
+            message = "Received \(received) · sent \(sent) → \(peerLabel)" + imageSuffix
         } else if received > 0 {
             message = "Received \(received) from \(peerLabel)" + imageSuffix
         } else {
-            message = "Sent \(sent) to \(peerLabel)" + imageSuffix
+            message = "Sent \(sent) → \(peerLabel)" + imageSuffix
         }
 
         let statusLine: String
         if received == 0, sent == 0, imagesIn == 0, imagesOut == 0 {
             statusLine = "Synced — already up to date with \(peerLabel)"
         } else {
-            statusLine = "Synced — received \(received) · sent \(sent) to \(peerLabel)" + imageSuffix
+            statusLine = "Synced — received \(received) · sent \(sent) → \(peerLabel)" + imageSuffix
         }
 
         return SyncFeedback(
@@ -255,6 +344,8 @@ public enum SyncDebugLog {
                 "received=\(result.localAppliedIDs.count) sent=\(result.peerAppliedIDs.count) "
                     + "remainingOut=\(result.remainingOutboundIDs.count) remoteCatalog=\(result.remoteNotes.count) "
                     + "imagesIn=\(result.imagesReceived) imagesOut=\(result.imagesSent) "
+                    + "conflicts=\(result.conflicts.count) "
+                    + "awaitMac=\(result.awaitingAuthorityMerge.count) "
                     + "ack=\(result.peerSupportsAck)"
             )
             if !result.remainingOutboundIDs.isEmpty {

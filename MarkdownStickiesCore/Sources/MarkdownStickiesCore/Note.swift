@@ -57,6 +57,48 @@ public struct Note: Identifiable, Hashable, Sendable {
         }
         return (label, nil)
     }
+
+    /// Folder crumbs from the matched scan root down to the note’s parent directory.
+    public static func locationSegments(for notePath: URL, scanRoots: [URL]) -> [NoteLocationSegment] {
+        let noteDir = notePath.deletingLastPathComponent().standardizedFileURL
+        let noteDirPath = noteDir.path
+
+        let match = scanRoots
+            .map(\.standardizedFileURL)
+            .filter { root in
+                let rootPath = root.path
+                return noteDirPath == rootPath
+                    || noteDirPath.hasPrefix(rootPath.hasSuffix("/") ? rootPath : rootPath + "/")
+            }
+            .max(by: { $0.path.count < $1.path.count })
+
+        guard let root = match else {
+            return [NoteLocationSegment(name: noteDir.lastPathComponent, url: noteDir)]
+        }
+
+        var segments = [NoteLocationSegment(name: root.lastPathComponent, url: root)]
+        guard noteDirPath != root.path else { return segments }
+
+        let relative = String(noteDirPath.dropFirst(root.path.count))
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        var current = root
+        for part in relative.split(separator: "/").map(String.init) where !part.isEmpty {
+            current = current.appendingPathComponent(part, isDirectory: true)
+            segments.append(NoteLocationSegment(name: part, url: current.standardizedFileURL))
+        }
+        return segments
+    }
+}
+
+public struct NoteLocationSegment: Hashable, Sendable, Identifiable {
+    public var id: String { url.path }
+    public let name: String
+    public let url: URL
+
+    public init(name: String, url: URL) {
+        self.name = name
+        self.url = url
+    }
 }
 
 public enum NoteFilename {

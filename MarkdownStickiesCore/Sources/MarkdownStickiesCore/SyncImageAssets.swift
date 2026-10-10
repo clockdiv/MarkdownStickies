@@ -74,8 +74,8 @@ public enum SyncImageAssets {
     }
 
     /// Offers for every image referenced by notes under `roots` that exists on disk.
-    public static func offers(roots: [URL]) -> [SyncAssetOffer] {
-        let notes = NoteScanner.scan(roots: roots)
+    public static func offers(roots: [URL], config: ScanConfig = .empty) -> [SyncAssetOffer] {
+        let notes = NoteScanner.scan(roots: roots, config: config)
         var offers: [SyncAssetOffer] = []
         var seenKeys = Set<String>()
         for note in notes {
@@ -117,7 +117,7 @@ public enum SyncImageAssets {
 
     public static func loadBlob(offer: SyncAssetOffer, roots: [URL]) -> SyncAssetBlob? {
         guard let name = sanitizedFilename(offer.relativePath),
-              let notePath = SyncCatalogBuilder.pathIndex(roots: roots)[offer.noteID]
+              let notePath = SyncCatalogBuilder.pathIndex(roots: roots, config: ScanConfig.load())[offer.noteID]
         else { return nil }
         let folder = notePath.deletingLastPathComponent()
         let text = try? String(contentsOf: notePath, encoding: .utf8)
@@ -156,7 +156,7 @@ public enum SyncImageAssets {
     @discardableResult
     public static func applyBlob(_ blob: SyncAssetBlob, roots: [URL]) throws -> URL? {
         guard let name = sanitizedFilename(blob.relativePath) else { return nil }
-        guard let notePath = SyncCatalogBuilder.pathIndex(roots: roots)[blob.noteID] else {
+        guard let notePath = SyncCatalogBuilder.pathIndex(roots: roots, config: ScanConfig.load())[blob.noteID] else {
             return nil
         }
         guard let data = Data(base64Encoded: blob.dataBase64, options: .ignoreUnknownCharacters),

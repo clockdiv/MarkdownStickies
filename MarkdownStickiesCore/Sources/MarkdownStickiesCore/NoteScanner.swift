@@ -1,7 +1,25 @@
 import Foundation
 
 public enum NoteScanner {
-    public static func scan(roots: [URL]) -> [Note] {
+    /// Directory names always skipped while walking (in addition to `scan.conf`).
+    public static let builtinSkippedDirectories: Set<String> = [
+        "node_modules",
+        ".git",
+        "DerivedData",
+        "build",
+        ".build",
+        "Pods",
+        "Carthage",
+        "vendor",
+        "target",
+        "dist",
+        ".swiftpm",
+        "xcuserdata",
+        ".hg",
+        ".svn",
+    ]
+
+    public static func scan(roots: [URL], config: ScanConfig = .empty) -> [Note] {
         var notes: [Note] = []
         let fm = FileManager.default
 
@@ -18,7 +36,7 @@ public enum NoteScanner {
                 let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey, .contentModificationDateKey])
                 if values?.isDirectory == true {
                     let name = url.lastPathComponent
-                    if name == "node_modules" || name == ".git" || name == "DerivedData" || name == "build" {
+                    if builtinSkippedDirectories.contains(name) {
                         enumerator.skipDescendants()
                     }
                     continue
@@ -26,8 +44,11 @@ public enum NoteScanner {
                 guard values?.isRegularFile == true else { continue }
                 guard NoteFilename.matches(url.lastPathComponent) else { continue }
 
+                let file = url.standardizedFileURL
+                guard config.allows(fileURL: file) else { continue }
+
                 let modified = values?.contentModificationDate ?? Date.distantPast
-                if let note = NoteFilename.parse(url: url.standardizedFileURL, modifiedAt: modified) {
+                if let note = NoteFilename.parse(url: file, modifiedAt: modified) {
                     notes.append(note)
                 }
             }

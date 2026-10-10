@@ -11,23 +11,26 @@
 		A10000000000000000000002 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000002 /* AppDelegate.swift */; };
 		A10000000000000000000005 /* StickyColor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000005 /* StickyColor.swift */; };
 		A10000000000000000000006 /* NoteWindowState.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000006 /* NoteWindowState.swift */; };
-		A10000000000000000000007 /* BookmarkStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000007 /* BookmarkStore.swift */; };
 		A10000000000000000000009 /* NoteStateStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000009 /* NoteStateStore.swift */; };
+		A10000000000000000000023 /* ScanConfigStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000023 /* ScanConfigStore.swift */; };
 		A1000000000000000000000A /* FolderWatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000A /* FolderWatcher.swift */; };
 		A1000000000000000000000B /* NoteStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000B /* NoteStore.swift */; };
 		A1000000000000000000000C /* StickyWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000C /* StickyWindowController.swift */; };
 		A1000000000000000000000D /* StickyWindowManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000D /* StickyWindowManager.swift */; };
 		A1000000000000000000000F /* ControlWindowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000F /* ControlWindowView.swift */; };
 		A10000000000000000000022 /* SyncBannerOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000022 /* SyncBannerOverlay.swift */; };
+		A10000000000000000000029 /* SyncConflictSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000029 /* SyncConflictSheet.swift */; };
 		A10000000000000000000010 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000010 /* Assets.xcassets */; };
 		A10000000000000000000016 /* NoteImageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000016 /* NoteImageStore.swift */; };
 		A10000000000000000000017 /* MarkdownBlockParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000017 /* MarkdownBlockParser.swift */; };
 		A10000000000000000000018 /* MarkdownHTMLRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000018 /* MarkdownHTMLRenderer.swift */; };
-		A1000000000000000000001B /* LivePreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000001B /* LivePreviewView.swift */; };
 		A1000000000000000000001C /* StickyTitlebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000001C /* StickyTitlebarView.swift */; };
 		A1000000000000000000001D /* StickyPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000001D /* StickyPanel.swift */; };
-		A1000000000000000000001F /* WebKitHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000001F /* WebKitHelpers.swift */; };
+		A10000000000000000000028 /* NoteHoverPreviewPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000028 /* NoteHoverPreviewPanel.swift */; };
 		A10000000000000000000021 /* HTMLConvertWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000021 /* HTMLConvertWindowController.swift */; };
+		A10000000000000000000025 /* StickyNoteEditorBody.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000025 /* StickyNoteEditorBody.swift */; };
+		A10000000000000000000026 /* MarkdownSourceEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000026 /* MarkdownSourceEditorView.swift */; };
+		A10000000000000000000027 /* MarkdownTableEditorController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000027 /* MarkdownTableEditorController.swift */; };
 		A10000000000000000000020 /* MarkdownStickiesCore in Frameworks */ = {isa = PBXBuildFile; productRef = PKG00000000000000000002 /* MarkdownStickiesCore */; };
 		A30000000000000000000001 /* MarkdownStickiesIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B30000000000000000000001 /* MarkdownStickiesIOSApp.swift */; };
 		A30000000000000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B30000000000000000000002 /* ContentView.swift */; };
@@ -45,24 +48,27 @@
 		B10000000000000000000002 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		B10000000000000000000005 /* StickyColor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StickyColor.swift; sourceTree = "<group>"; };
 		B10000000000000000000006 /* NoteWindowState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoteWindowState.swift; sourceTree = "<group>"; };
-		B10000000000000000000007 /* BookmarkStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookmarkStore.swift; sourceTree = "<group>"; };
 		B10000000000000000000009 /* NoteStateStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoteStateStore.swift; sourceTree = "<group>"; };
+		B10000000000000000000023 /* ScanConfigStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanConfigStore.swift; sourceTree = "<group>"; };
 		B1000000000000000000000A /* FolderWatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderWatcher.swift; sourceTree = "<group>"; };
 		B1000000000000000000000B /* NoteStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoteStore.swift; sourceTree = "<group>"; };
 		B1000000000000000000000C /* StickyWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StickyWindowController.swift; sourceTree = "<group>"; };
 		B1000000000000000000000D /* StickyWindowManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StickyWindowManager.swift; sourceTree = "<group>"; };
 		B1000000000000000000000F /* ControlWindowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlWindowView.swift; sourceTree = "<group>"; };
 		B10000000000000000000022 /* SyncBannerOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncBannerOverlay.swift; sourceTree = "<group>"; };
+		B10000000000000000000029 /* SyncConflictSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncConflictSheet.swift; sourceTree = "<group>"; };
 		B10000000000000000000010 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B10000000000000000000011 /* MarkdownStickies.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = MarkdownStickies.entitlements; sourceTree = "<group>"; };
 		B10000000000000000000016 /* NoteImageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoteImageStore.swift; sourceTree = "<group>"; };
 		B10000000000000000000017 /* MarkdownBlockParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownBlockParser.swift; sourceTree = "<group>"; };
 		B10000000000000000000018 /* MarkdownHTMLRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownHTMLRenderer.swift; sourceTree = "<group>"; };
-		B1000000000000000000001B /* LivePreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LivePreviewView.swift; sourceTree = "<group>"; };
 		B1000000000000000000001C /* StickyTitlebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StickyTitlebarView.swift; sourceTree = "<group>"; };
 		B1000000000000000000001D /* StickyPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StickyPanel.swift; sourceTree = "<group>"; };
-		B1000000000000000000001F /* WebKitHelpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebKitHelpers.swift; sourceTree = "<group>"; };
+		B10000000000000000000028 /* NoteHoverPreviewPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoteHoverPreviewPanel.swift; sourceTree = "<group>"; };
 		B10000000000000000000021 /* HTMLConvertWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTMLConvertWindowController.swift; sourceTree = "<group>"; };
+		B10000000000000000000025 /* StickyNoteEditorBody.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StickyNoteEditorBody.swift; sourceTree = "<group>"; };
+		B10000000000000000000026 /* MarkdownSourceEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownSourceEditorView.swift; sourceTree = "<group>"; };
+		B10000000000000000000027 /* MarkdownTableEditorController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownTableEditorController.swift; sourceTree = "<group>"; };
 		B30000000000000000000001 /* MarkdownStickiesIOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownStickiesIOSApp.swift; sourceTree = "<group>"; };
 		B30000000000000000000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		B30000000000000000000003 /* VaultStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaultStore.swift; sourceTree = "<group>"; };
@@ -141,8 +147,8 @@
 		E10000000000000000000005 /* Services */ = {
 			isa = PBXGroup;
 			children = (
-				B10000000000000000000007 /* BookmarkStore.swift */,
 				B10000000000000000000009 /* NoteStateStore.swift */,
+				B10000000000000000000023 /* ScanConfigStore.swift */,
 				B1000000000000000000000A /* FolderWatcher.swift */,
 				B1000000000000000000000B /* NoteStore.swift */,
 				B10000000000000000000016 /* NoteImageStore.swift */,
@@ -157,10 +163,12 @@
 			children = (
 				B1000000000000000000000C /* StickyWindowController.swift */,
 				B1000000000000000000000D /* StickyWindowManager.swift */,
-				B1000000000000000000001B /* LivePreviewView.swift */,
+				B10000000000000000000025 /* StickyNoteEditorBody.swift */,
+				B10000000000000000000026 /* MarkdownSourceEditorView.swift */,
+				B10000000000000000000027 /* MarkdownTableEditorController.swift */,
 				B1000000000000000000001C /* StickyTitlebarView.swift */,
 				B1000000000000000000001D /* StickyPanel.swift */,
-				B1000000000000000000001F /* WebKitHelpers.swift */,
+				B10000000000000000000028 /* NoteHoverPreviewPanel.swift */,
 				B10000000000000000000021 /* HTMLConvertWindowController.swift */,
 			);
 			path = Windows;
@@ -171,6 +179,7 @@
 			children = (
 				B1000000000000000000000F /* ControlWindowView.swift */,
 				B10000000000000000000022 /* SyncBannerOverlay.swift */,
+				B10000000000000000000029 /* SyncConflictSheet.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -302,21 +311,24 @@
 				A10000000000000000000002 /* AppDelegate.swift in Sources */,
 				A10000000000000000000005 /* StickyColor.swift in Sources */,
 				A10000000000000000000006 /* NoteWindowState.swift in Sources */,
-				A10000000000000000000007 /* BookmarkStore.swift in Sources */,
 				A10000000000000000000009 /* NoteStateStore.swift in Sources */,
+				A10000000000000000000023 /* ScanConfigStore.swift in Sources */,
 				A1000000000000000000000A /* FolderWatcher.swift in Sources */,
 				A1000000000000000000000B /* NoteStore.swift in Sources */,
 				A1000000000000000000000C /* StickyWindowController.swift in Sources */,
 				A1000000000000000000000D /* StickyWindowManager.swift in Sources */,
 				A1000000000000000000000F /* ControlWindowView.swift in Sources */,
 				A10000000000000000000022 /* SyncBannerOverlay.swift in Sources */,
+				A10000000000000000000029 /* SyncConflictSheet.swift in Sources */,
 				A10000000000000000000016 /* NoteImageStore.swift in Sources */,
 				A10000000000000000000017 /* MarkdownBlockParser.swift in Sources */,
 				A10000000000000000000018 /* MarkdownHTMLRenderer.swift in Sources */,
-				A1000000000000000000001B /* LivePreviewView.swift in Sources */,
+				A10000000000000000000025 /* StickyNoteEditorBody.swift in Sources */,
+				A10000000000000000000026 /* MarkdownSourceEditorView.swift in Sources */,
+				A10000000000000000000027 /* MarkdownTableEditorController.swift in Sources */,
 				A1000000000000000000001C /* StickyTitlebarView.swift in Sources */,
 				A1000000000000000000001D /* StickyPanel.swift in Sources */,
-				A1000000000000000000001F /* WebKitHelpers.swift in Sources */,
+				A10000000000000000000028 /* NoteHoverPreviewPanel.swift in Sources */,
 				A10000000000000000000021 /* HTMLConvertWindowController.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

@@ -9,9 +9,14 @@ let package = Package(
     ],
     products: [
         .library(name: "MarkdownStickiesCore", targets: ["MarkdownStickiesCore"]),
+        .executable(name: "SyncMergeHarness", targets: ["SyncMergeHarness"]),
     ],
     targets: [
         .target(name: "MarkdownStickiesCore"),
+        .executableTarget(
+            name: "SyncMergeHarness",
+            dependencies: ["MarkdownStickiesCore"]
+        ),
         .testTarget(
             name: "MarkdownStickiesCoreTests",
             dependencies: ["MarkdownStickiesCore"]

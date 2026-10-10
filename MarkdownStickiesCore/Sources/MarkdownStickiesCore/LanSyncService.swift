@@ -20,15 +20,25 @@ public final class LanSyncService: ObservableObject {
     /// Folders used for note-adjacent image discovery / apply (protocol ≥ 3).
     public var syncRootsProvider: (() -> [URL])?
     /// Apply a remote catalog and return which note IDs were written (for peer ACK).
-    public var onApplyRemoteCatalog: (([SyncNotePayload]) -> SyncApplyAck)?
+    public var onApplyRemoteCatalog: (([SyncNotePayload], String?) -> SyncApplyAck)?
     /// Fired after a full exchange finishes (client or server), with honest feedback.
     public var onExchangeFinished: ((SyncExchangeResult, SyncExchangeRole) -> Void)?
+    /// Live banner updates while a sync is in flight (client or inbound server).
+    public var onProgress: ((SyncFeedback) -> Void)?
+    /// Peer tapped OK on their sync result — clear our matching card.
+    public var onRemoteBannerDismiss: (() -> Void)?
+    /// Peer chose Sync Later / Later — abort merge UI on both sides.
+    public var onRemoteMergeCancel: (() -> Void)?
 
     private var listener: NWListener?
     private var publishedPort: NWEndpoint.Port?
     private var netService: NetService?
     private var browserDelegate: BrowseDelegate?
     private var permissionBrowser: NWBrowser?
+    private var progressStartedAt: Date?
+    private var progressTimeoutSeconds: Int?
+    private var progressTitle = "Syncing"
+    private var inboundActive = false
 
     public init(peerID: UUID? = nil, deviceName: String) {
         let id = peerID ?? Self.loadOrCreatePeerID()
@@ -39,6 +49,57 @@ public final class LanSyncService: ObservableObject {
 
     public func setStatus(_ status: String?) {
         lastStatus = status
+    }
+
+    /// Fire-and-forget: tell the peer to drop their sync result card (OK on this device).
+    /// Must never touch the progress UI — a prior bug left Mac stuck on “Found peer…”.
+    public func notifyPeerDismissBanner() {
+        Task { await sendQuietWireMessage(SyncWireMessage.dismissBanner()) }
+    }
+
+    /// Fire-and-forget: abort merge session on the peer (Sync Later / Later).
+    public func notifyPeerCancelMerge() {
+        Task { await sendQuietWireMessage(SyncWireMessage.cancelMerge()) }
+    }
+
+    /// Push a live progress card update (also updates `lastStatus`).
+    /// Requires an active `beginProgressSession` — never invent a progress card from Bonjour chatter
+    /// (that left OK→dismiss stuck on “Found peer…” forever).
+    public func reportProgress(
+        title: String? = nil,
+        message: String,
+        currentItem: String? = nil,
+        peerName: String? = nil,
+        debugCode: String = "sync:progress"
+    ) {
+        guard let started = progressStartedAt else {
+            lastStatus = message
+            return
+        }
+        if let title { progressTitle = title }
+        let feedback = SyncFeedback.progress(
+            title: progressTitle,
+            message: message,
+            startedAt: started,
+            timeoutSeconds: progressTimeoutSeconds,
+            currentItem: currentItem,
+            peerName: peerName,
+            debugCode: debugCode
+        )
+        lastStatus = feedback.statusLine
+        onProgress?(feedback)
+    }
+
+    private func beginProgressSession(title: String, timeoutSeconds: Int?) {
+        progressStartedAt = Date()
+        progressTimeoutSeconds = timeoutSeconds
+        progressTitle = title
+    }
+
+    private func endProgressSession() {
+        progressStartedAt = nil
+        progressTimeoutSeconds = nil
+        progressTitle = "Syncing"
     }
 
     /// Updates the human-readable device label (Bonjour TXT + sync hello / `created_on`).
@@ -127,6 +188,16 @@ public final class LanSyncService: ObservableObject {
         }
     }
 
+    /// Re-assert Bonjour presence (iOS often needs this after foregrounding).
+    public func ensureAdvertisingFresh() {
+        requestLocalNetworkAuthorization()
+        if listener == nil {
+            startAdvertising()
+        } else {
+            republishNetServiceIfNeeded()
+        }
+    }
+
     private func publishNetService(port: NWEndpoint.Port?) {
         guard let port else { return }
         netService?.stop()
@@ -153,30 +224,42 @@ public final class LanSyncService: ObservableObject {
     public func syncWithPeer(timeoutSeconds: TimeInterval = 20) async throws -> SyncExchangeResult {
         guard !isSyncing else { throw SyncProtocolError.connectionFailed("Sync already in progress.") }
         isSyncing = true
-        lastStatus = "Looking for peer…"
+        beginProgressSession(title: "Syncing", timeoutSeconds: Int(timeoutSeconds.rounded()))
+        reportProgress(message: "Looking for peer…", debugCode: "sync:looking")
         defer {
             isSyncing = false
             browserDelegate?.stop()
             browserDelegate = nil
+            endProgressSession()
         }
 
         startAdvertising()
         // Give our listener + peer Bonjour a moment before browsing.
-        try? await Task.sleep(nanoseconds: 800_000_000)
+        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        reportProgress(message: "Looking for peer…", debugCode: "sync:looking")
 
+        // Mac→iOS often misses the phone on the first browse (iOS advertises late after wake).
+        // Retry a few times instead of failing on “saw only ourselves”.
         let endpoint: NWEndpoint
         do {
-            endpoint = try await browseForPeer(timeoutSeconds: timeoutSeconds)
+            endpoint = try await browseForPeerWithRetries(
+                perAttemptTimeout: min(timeoutSeconds, 12),
+                attempts: 3
+            )
         } catch {
             lastStatus = Self.friendlyNetworkError(error)
             throw error
         }
 
-        lastStatus = "Connecting…"
+        reportProgress(message: "Found peer — connecting…", debugCode: "sync:found")
         do {
             var result = try await exchangeAsClient(endpoint: endpoint)
             if !result.peerConfirmedOutbound, result.peerSupportsAck, !result.unconfirmedOutboundIDs.isEmpty {
-                lastStatus = "Peer missing \(result.unconfirmedOutboundIDs.count) note(s) — retrying…"
+                reportProgress(
+                    message: "Peer missing \(result.unconfirmedOutboundIDs.count) note(s) — retrying…",
+                    peerName: result.peerDeviceName,
+                    debugCode: "sync:retry"
+                )
                 try? await Task.sleep(nanoseconds: 400_000_000)
                 result = try await exchangeAsClient(endpoint: endpoint)
             }
@@ -223,7 +306,7 @@ public final class LanSyncService: ObservableObject {
             return "Local Network access denied. Enable Markdown Stickies under Settings → Privacy → Local Network (iPhone and Mac). Reinstall if the toggle is missing."
         }
         if case SyncProtocolError.peerNotFound = error {
-            return "No peer found. Same Wi‑Fi, both apps open, Mac Sync folder on, iOS folder picked. Allow Local Network. Tap Sync on only one side."
+            return "No peer found. Keep both apps open in the foreground on the same Wi‑Fi, then try Sync again. (iPhone often needs a moment after opening before Mac can see it — Sync from iPhone also works.)"
         }
         if case SyncProtocolError.timedOut = error {
             return "Connection timed out. Try Sync again from one device only."
@@ -233,13 +316,44 @@ public final class LanSyncService: ObservableObject {
 
     // MARK: - Browse (NetService)
 
-    private func browseForPeer(timeoutSeconds: TimeInterval) async throws -> NWEndpoint {
+    private func browseForPeerWithRetries(
+        perAttemptTimeout: TimeInterval,
+        attempts: Int
+    ) async throws -> NWEndpoint {
+        var lastError: Error = SyncProtocolError.peerNotFound
+        for attempt in 1...max(1, attempts) {
+            if attempt > 1 {
+                reportProgress(
+                    message: "Still looking for peer…",
+                    debugCode: "sync:looking-retry"
+                )
+                ensureAdvertisingFresh()
+                try? await Task.sleep(nanoseconds: 900_000_000)
+            }
+            browserDelegate?.stop()
+            browserDelegate = nil
+            do {
+                return try await browseForPeer(timeoutSeconds: perAttemptTimeout)
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError
+    }
+
+    private func browseForPeer(
+        timeoutSeconds: TimeInterval,
+        reportStatus: Bool = true
+    ) async throws -> NWEndpoint {
         try await withCheckedThrowingContinuation { continuation in
             let delegate = BrowseDelegate(
                 ourBonjourName: bonjourName,
                 ourPeerID: peerID,
                 onStatus: { [weak self] text in
-                    Task { @MainActor in self?.lastStatus = text }
+                    guard reportStatus else { return }
+                    Task { @MainActor in
+                        self?.reportProgress(message: text, debugCode: "sync:looking")
+                    }
                 },
                 onFound: { endpoint in
                     continuation.resume(returning: endpoint)
@@ -264,14 +378,15 @@ public final class LanSyncService: ObservableObject {
         defer { connection.cancel() }
 
         try await startAndWaitReady(connection, timeoutSeconds: 10) { [weak self] text in
-            Task { @MainActor in self?.lastStatus = text }
+            Task { @MainActor in
+                self?.reportProgress(message: text, debugCode: "sync:connecting")
+            }
         }
-        lastStatus = "Exchanging notes…"
+        reportProgress(message: "Exchanging notes…", debugCode: "sync:exchange")
         let localNotes = catalogProvider?() ?? []
         return try await receiveCatalogExchange(
             connection: connection,
-            localNotes: localNotes,
-            asServer: false
+            localNotes: localNotes
         )
     }
 
@@ -324,154 +439,254 @@ public final class LanSyncService: ObservableObject {
     }
 
     private func handleInbound(_ connection: NWConnection) async {
+        // Don't interrupt an outbound sync's progress card with inbound noise.
+        if isSyncing {
+            connection.cancel()
+            return
+        }
+        inboundActive = true
+        var progressStarted = false
+        defer {
+            inboundActive = false
+            if progressStarted { endProgressSession() }
+            connection.cancel()
+        }
         do {
             try await startAndWaitReady(connection, timeoutSeconds: 12)
-            let result = try await receiveCatalogExchange(
+            var buffer = Data()
+            let hello = try await receiveMessage(on: connection, buffer: &buffer, timeoutSeconds: 30)
+            guard hello.kind == .hello else {
+                throw SyncProtocolError.unexpectedMessage(hello.kind)
+            }
+            let next = try await receiveMessage(on: connection, buffer: &buffer, timeoutSeconds: 45)
+            if next.kind == .dismissBanner {
+                onRemoteBannerDismiss?()
+                return
+            }
+            if next.kind == .cancelMerge {
+                onRemoteMergeCancel?()
+                return
+            }
+            guard next.kind == .catalog, let remoteNotes = next.notes else {
+                throw SyncProtocolError.unexpectedMessage(next.kind)
+            }
+
+            progressStarted = true
+            beginProgressSession(title: "Sync requested", timeoutSeconds: 45)
+            let peerName = hello.deviceName ?? next.deviceName
+            reportProgress(
+                title: "Sync requested",
+                message: "Peer connected\(peerName.map { " — \($0)" } ?? "")",
+                peerName: peerName,
+                debugCode: "sync:inbound-hello"
+            )
+            let result = try await serveCatalogExchange(
                 connection: connection,
+                buffer: &buffer,
                 localNotes: catalogProvider?() ?? [],
-                asServer: true
+                remoteNotes: remoteNotes,
+                hello: hello,
+                peerName: peerName
             )
             let feedback = SyncFeedback.from(
                 result: result,
                 role: .server,
                 peerName: result.peerDeviceName
             )
-            if !isSyncing {
-                lastStatus = feedback.statusLine
-            }
+            lastStatus = feedback.statusLine
             onExchangeFinished?(result, .server)
         } catch {
-            if !isSyncing {
-                lastStatus = Self.friendlyNetworkError(error)
+            // Quiet dismiss connections should not surface as sync failures.
+            if progressStarted {
+                let message = Self.friendlyNetworkError(error)
+                lastStatus = message
+                onProgress?(
+                    SyncFeedback(
+                        kind: .failure,
+                        title: "Sync failed",
+                        message: message,
+                        statusLine: "Sync failed — \(message)",
+                        detail: String(describing: error),
+                        debugCode: "sync:inbound-error",
+                        receivedCount: 0,
+                        sentConfirmedCount: 0,
+                        sentExpectedCount: 0
+                    )
+                )
             }
         }
-        connection.cancel()
+    }
+
+    /// Silent control message → peer: no progress card, short browse, ignore failures.
+    private func sendQuietWireMessage(_ message: SyncWireMessage) async {
+        guard !isSyncing, !inboundActive else { return }
+        // Don't steal the sync browser while a real exchange may start.
+        if browserDelegate != nil { return }
+        do {
+            let endpoint = try await browseForPeer(timeoutSeconds: 3, reportStatus: false)
+            browserDelegate?.stop()
+            browserDelegate = nil
+            let parameters = NWParameters.tcp
+            parameters.includePeerToPeer = true
+            parameters.expiredDNSBehavior = .allow
+            let connection = NWConnection(to: endpoint, using: parameters)
+            defer { connection.cancel() }
+            try await startAndWaitReady(connection, timeoutSeconds: 4)
+            guard !isSyncing else { return }
+            try await send(SyncWireMessage.hello(peerID: peerID, deviceName: deviceName), on: connection)
+            try await send(message, on: connection)
+            try? await Task.sleep(nanoseconds: 120_000_000)
+        } catch {
+            browserDelegate?.stop()
+            browserDelegate = nil
+            // Peer offline / old build — local dismiss still stands.
+        }
     }
 
     private func receiveCatalogExchange(
         connection: NWConnection,
-        localNotes: [SyncNotePayload],
-        asServer: Bool
+        localNotes: [SyncNotePayload]
     ) async throws -> SyncExchangeResult {
         // Shared across reads so coalesced TCP frames aren't dropped.
         var buffer = Data()
 
-        if !asServer {
-            lastStatus = "Exchanging notes… (sending)"
-            try await send(SyncWireMessage.hello(peerID: peerID, deviceName: deviceName), on: connection)
-            try await send(SyncWireMessage.catalog(localNotes, deviceName: deviceName), on: connection)
-            lastStatus = "Exchanging notes… (waiting for peer)"
-            let reply = try await receiveMessage(on: connection, buffer: &buffer, timeoutSeconds: 45)
-            guard reply.kind == .catalog, let remoteNotes = reply.notes else {
-                throw SyncProtocolError.unexpectedMessage(reply.kind)
-            }
+        reportProgress(
+            message: "Sending \(localNotes.count) note(s)…",
+            debugCode: "sync:send-catalog"
+        )
+        try await send(SyncWireMessage.hello(peerID: peerID, deviceName: deviceName), on: connection)
+        try await send(SyncWireMessage.catalog(localNotes, deviceName: deviceName), on: connection)
+        reportProgress(
+            message: "Waiting for peer catalog…",
+            peerName: nil,
+            debugCode: "sync:wait-catalog"
+        )
+        let reply = try await receiveMessage(on: connection, buffer: &buffer, timeoutSeconds: 45)
+        guard reply.kind == .catalog, let remoteNotes = reply.notes else {
+            throw SyncProtocolError.unexpectedMessage(reply.kind)
+        }
 
-            let peerAppliedIDs = reply.appliedIDs ?? []
-            let peerSupportsAck = reply.appliedIDs != nil
-            let peerVersion = reply.protocolVersion ?? 1
+        let peerAppliedIDs = reply.appliedIDs ?? []
+        let peerSupportsAck = reply.appliedIDs != nil
+        let peerVersion = reply.protocolVersion ?? 1
+        let peerName = reply.deviceName
 
-            lastStatus = "Exchanging notes… (applying)"
-            let localAck = applyRemote(remoteNotes)
-            try await send(SyncWireMessage.applied(localAck.appliedIDs), on: connection)
+        reportProgress(
+            message: "Receiving \(remoteNotes.count) note(s)…",
+            peerName: peerName,
+            debugCode: "sync:recv-catalog"
+        )
+        let localAck = applyRemote(remoteNotes, peerName: peerName)
+        try await send(SyncWireMessage.applied(localAck.appliedIDs), on: connection)
 
-            // Peer catalog is *after* they applied our notes — remaining = still missing there.
-            let remainingOutbound = SyncMerge.outboundIDs(ours: localNotes, theirs: remoteNotes)
-            var imagesReceived = 0
-            var imagesSent = 0
-            if peerVersion >= 3 {
-                let images = try await exchangeAssets(
-                    connection: connection,
-                    buffer: &buffer,
-                    asServer: false
-                )
-                imagesReceived = images.received
-                imagesSent = images.sent
-            }
-
-            return SyncExchangeResult(
-                remoteNotes: remoteNotes,
-                peerAppliedIDs: peerAppliedIDs,
-                localAppliedIDs: localAck.appliedIDs,
-                remainingOutboundIDs: remainingOutbound,
-                peerSupportsAck: peerSupportsAck,
-                peerDeviceName: reply.deviceName,
-                imagesReceived: imagesReceived,
-                imagesSent: imagesSent
+        // Peer catalog is *after* they applied our notes — remaining = still missing there.
+        let remainingOutbound = SyncMerge.outboundIDs(ours: localNotes, theirs: remoteNotes)
+        var imagesReceived = 0
+        var imagesSent = 0
+        if peerVersion >= 3 {
+            let images = try await exchangeAssets(
+                connection: connection,
+                buffer: &buffer,
+                asServer: false
             )
-        } else {
-            let hello = try await receiveMessage(on: connection, buffer: &buffer, timeoutSeconds: 30)
-            guard hello.kind == .hello else {
-                throw SyncProtocolError.unexpectedMessage(hello.kind)
-            }
-            let clientSupportsAck = (hello.protocolVersion ?? 1) >= 2
-            let clientSupportsAssets = (hello.protocolVersion ?? 1) >= 3
-            let peerName = hello.deviceName
+            imagesReceived = images.received
+            imagesSent = images.sent
+        }
 
-            let incoming = try await receiveMessage(on: connection, buffer: &buffer, timeoutSeconds: 45)
-            guard incoming.kind == .catalog, let remoteNotes = incoming.notes else {
-                throw SyncProtocolError.unexpectedMessage(incoming.kind)
-            }
+        return SyncExchangeResult(
+            remoteNotes: remoteNotes,
+            peerAppliedIDs: peerAppliedIDs,
+            localAppliedIDs: localAck.appliedIDs,
+            remainingOutboundIDs: remainingOutbound,
+            peerSupportsAck: peerSupportsAck,
+            peerDeviceName: peerName,
+            imagesReceived: imagesReceived,
+            imagesSent: imagesSent,
+            conflicts: localAck.conflicts,
+            awaitingAuthorityMerge: localAck.awaitingAuthorityMerge
+        )
+    }
 
-            // Apply *before* answering so the client's "out N" can be confirmed.
-            let serverAck = applyRemote(remoteNotes)
-            // Re-read local catalog after apply so the peer gets our post-merge state.
-            let freshLocal = catalogProvider?() ?? localNotes
+    /// Server half after hello + catalog were already read (so dismissBanner can short-circuit first).
+    private func serveCatalogExchange(
+        connection: NWConnection,
+        buffer: inout Data,
+        localNotes: [SyncNotePayload],
+        remoteNotes: [SyncNotePayload],
+        hello: SyncWireMessage,
+        peerName: String?
+    ) async throws -> SyncExchangeResult {
+        let clientSupportsAck = (hello.protocolVersion ?? 1) >= 2
+        let clientSupportsAssets = (hello.protocolVersion ?? 1) >= 3
 
-            try await send(
-                SyncWireMessage.catalog(freshLocal, appliedIDs: serverAck.appliedIDs, deviceName: deviceName),
-                on: connection
-            )
+        reportProgress(
+            title: "Syncing",
+            message: "Receiving \(remoteNotes.count) note(s)…",
+            peerName: peerName,
+            debugCode: "sync:inbound-recv"
+        )
+        let serverAck = applyRemote(remoteNotes, peerName: peerName)
+        let freshLocal = catalogProvider?() ?? localNotes
 
-            var clientAppliedIDs: [UUID] = []
-            var peerSupportsAck = clientSupportsAck
-            if clientSupportsAck {
-                do {
-                    let clientAck = try await receiveMessage(on: connection, buffer: &buffer, timeoutSeconds: 20)
-                    if clientAck.kind == .applied {
-                        clientAppliedIDs = clientAck.appliedIDs ?? []
-                    } else {
-                        peerSupportsAck = false
-                    }
-                } catch {
-                    // Client closed without ACK (older app or crash) — report unconfirmed.
+        reportProgress(
+            title: "Syncing",
+            message: "Sending \(freshLocal.count) note(s)…",
+            peerName: peerName,
+            debugCode: "sync:inbound-send"
+        )
+        try await send(
+            SyncWireMessage.catalog(freshLocal, appliedIDs: serverAck.appliedIDs, deviceName: deviceName),
+            on: connection
+        )
+
+        var clientAppliedIDs: [UUID] = []
+        var peerSupportsAck = clientSupportsAck
+        if clientSupportsAck {
+            do {
+                let clientAck = try await receiveMessage(on: connection, buffer: &buffer, timeoutSeconds: 20)
+                if clientAck.kind == .applied {
+                    clientAppliedIDs = clientAck.appliedIDs ?? []
+                } else {
                     peerSupportsAck = false
                 }
+            } catch {
+                peerSupportsAck = false
             }
-
-            // What the client still needs from us after they applied our catalog.
-            // Prefer remaining vs their ACK set when they ACKed; else predict from their original catalog.
-            let remainingOutbound: [UUID]
-            if peerSupportsAck {
-                let predicted = SyncMerge.outboundIDs(ours: freshLocal, theirs: remoteNotes)
-                let acked = Set(clientAppliedIDs)
-                remainingOutbound = predicted.filter { !acked.contains($0) }
-            } else {
-                remainingOutbound = SyncMerge.outboundIDs(ours: freshLocal, theirs: remoteNotes)
-            }
-
-            var imagesReceived = 0
-            var imagesSent = 0
-            if clientSupportsAssets {
-                let images = try await exchangeAssets(
-                    connection: connection,
-                    buffer: &buffer,
-                    asServer: true
-                )
-                imagesReceived = images.received
-                imagesSent = images.sent
-            }
-
-            return SyncExchangeResult(
-                remoteNotes: remoteNotes,
-                peerAppliedIDs: clientAppliedIDs,
-                localAppliedIDs: serverAck.appliedIDs,
-                remainingOutboundIDs: remainingOutbound,
-                peerSupportsAck: peerSupportsAck,
-                peerDeviceName: peerName ?? incoming.deviceName,
-                imagesReceived: imagesReceived,
-                imagesSent: imagesSent
-            )
         }
+
+        let remainingOutbound: [UUID]
+        if peerSupportsAck {
+            let predicted = SyncMerge.outboundIDs(ours: freshLocal, theirs: remoteNotes)
+            let acked = Set(clientAppliedIDs)
+            remainingOutbound = predicted.filter { !acked.contains($0) }
+        } else {
+            remainingOutbound = SyncMerge.outboundIDs(ours: freshLocal, theirs: remoteNotes)
+        }
+
+        var imagesReceived = 0
+        var imagesSent = 0
+        if clientSupportsAssets {
+            let images = try await exchangeAssets(
+                connection: connection,
+                buffer: &buffer,
+                asServer: true
+            )
+            imagesReceived = images.received
+            imagesSent = images.sent
+        }
+
+        return SyncExchangeResult(
+            remoteNotes: remoteNotes,
+            peerAppliedIDs: clientAppliedIDs,
+            localAppliedIDs: serverAck.appliedIDs,
+            remainingOutboundIDs: remainingOutbound,
+            peerSupportsAck: peerSupportsAck,
+            peerDeviceName: peerName,
+            imagesReceived: imagesReceived,
+            imagesSent: imagesSent,
+            conflicts: serverAck.conflicts,
+            awaitingAuthorityMerge: serverAck.awaitingAuthorityMerge
+        )
     }
 
     private struct AssetExchangeCounts {
@@ -486,8 +701,9 @@ public final class LanSyncService: ObservableObject {
         asServer: Bool
     ) async throws -> AssetExchangeCounts {
         let roots = syncRootsProvider?() ?? []
-        lastStatus = "Exchanging images…"
-        let localOffers = SyncImageAssets.offers(roots: roots)
+        reportProgress(message: "Exchanging images…", debugCode: "sync:images")
+        let config = ScanConfig.load()
+        let localOffers = SyncImageAssets.offers(roots: roots, config: config)
 
         if !asServer {
             try await send(SyncWireMessage.assetOffers(localOffers), on: connection)
@@ -524,7 +740,11 @@ public final class LanSyncService: ObservableObject {
         var sent = 0
         for offer in offers {
             guard let blob = SyncImageAssets.loadBlob(offer: offer, roots: roots) else { continue }
-            lastStatus = "Exchanging images… (sending \(sent + 1))"
+            reportProgress(
+                message: "Sending image…",
+                currentItem: offer.relativePath,
+                debugCode: "sync:image-out"
+            )
             try await send(SyncWireMessage.assetBlobs([blob]), on: connection)
             sent += 1
         }
@@ -546,7 +766,11 @@ public final class LanSyncService: ObservableObject {
             let blobs = message.assetBlobs ?? []
             if blobs.isEmpty { break }
             for blob in blobs {
-                lastStatus = "Exchanging images… (receiving \(received + 1))"
+                reportProgress(
+                    message: "Receiving image…",
+                    currentItem: blob.relativePath,
+                    debugCode: "sync:image-in"
+                )
                 if (try? SyncImageAssets.applyBlob(blob, roots: roots)) != nil {
                     received += 1
                 }
@@ -555,9 +779,27 @@ public final class LanSyncService: ObservableObject {
         return received
     }
 
-    private func applyRemote(_ remote: [SyncNotePayload]) -> SyncApplyAck {
+    private func applyRemote(_ remote: [SyncNotePayload], peerName: String?) -> SyncApplyAck {
         guard let onApplyRemoteCatalog else { return .empty }
-        return onApplyRemoteCatalog(remote)
+        if remote.isEmpty {
+            reportProgress(
+                message: "No new notes to apply",
+                peerName: peerName,
+                debugCode: "sync:apply-empty"
+            )
+            return onApplyRemoteCatalog(remote, peerName)
+        }
+        // Show each incoming title so the UI names what's landing.
+        for note in remote {
+            let label = note.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            reportProgress(
+                message: "Receiving note…",
+                currentItem: label.isEmpty ? "Untitled" : label,
+                peerName: peerName,
+                debugCode: "sync:note-in"
+            )
+        }
+        return onApplyRemoteCatalog(remote, peerName)
     }
 
     private func send(_ message: SyncWireMessage, on connection: NWConnection) async throws {
@@ -627,7 +869,8 @@ private final class BrowseDelegate: NSObject, NetServiceBrowserDelegate, NetServ
     private var pending: [NetService] = []
     private var resolving: NetService?
     private var finished = false
-    private var seenCount = 0
+    /// Other peers only — our own Bonjour name used to inflate “saw 1” and confuse Mac→iOS.
+    private var foreignSeenCount = 0
     private var timeoutItem: DispatchWorkItem?
 
     init(
@@ -669,6 +912,7 @@ private final class BrowseDelegate: NSObject, NetServiceBrowserDelegate, NetServ
     private func succeed(_ endpoint: NWEndpoint) {
         guard !finished else { return }
         finished = true
+        onStatus("Found peer…")
         stop()
         onFound(endpoint)
     }
@@ -677,10 +921,10 @@ private final class BrowseDelegate: NSObject, NetServiceBrowserDelegate, NetServ
         guard !finished else { return }
         finished = true
         stop()
-        if seenCount == 0 {
-            onStatus("Looking for peer… (saw 0 services)")
+        if foreignSeenCount == 0 {
+            onStatus("Looking for peer…")
         } else {
-            onStatus("Looking for peer… (saw \(seenCount), none usable)")
+            onStatus("Peer seen — couldn’t connect")
         }
         onFailed(error)
     }
@@ -700,6 +944,7 @@ private final class BrowseDelegate: NSObject, NetServiceBrowserDelegate, NetServ
         guard !isSelf(service) else { return }
         if pending.contains(where: { $0.name == service.name }) { return }
         if resolving?.name == service.name { return }
+        foreignSeenCount += 1
         pending.append(service)
         resolveNextIfNeeded()
     }
@@ -710,13 +955,16 @@ private final class BrowseDelegate: NSObject, NetServiceBrowserDelegate, NetServ
         let service = pending.removeFirst()
         resolving = service
         service.delegate = self
-        onStatus("Looking for peer… (resolving \(service.name))")
+        onStatus("Found peer — resolving…")
         service.resolve(withTimeout: 8)
     }
 
     func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
-        seenCount += 1
-        onStatus("Looking for peer… (saw \(seenCount))")
+        if isSelf(service) {
+            // Ignore our own advertisement — it used to show as “saw 1” with no real peer.
+            return
+        }
+        onStatus("Looking for peer…")
         enqueue(service)
     }
 
@@ -726,22 +974,29 @@ private final class BrowseDelegate: NSObject, NetServiceBrowserDelegate, NetServ
 
     func netServiceDidResolveAddress(_ sender: NetService) {
         resolving = nil
-        if let endpoint = Self.preferredEndpoint(for: sender) {
-            succeed(endpoint)
-            return
-        }
-        // Bad address — try the next advertised peer instead of aborting.
-        resolveNextIfNeeded()
-        if resolving == nil, pending.isEmpty {
-            // Keep browsing until the overall timeout; don't fail early.
-            onStatus("Looking for peer… (resolve produced no address)")
-        }
+        succeed(
+            Self.preferredEndpoint(for: sender)
+                ?? NWEndpoint.service(
+                    name: sender.name,
+                    type: "_mdstickies._tcp",
+                    domain: "local",
+                    interface: nil
+                )
+        )
     }
 
     func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
         resolving = nil
-        onStatus("Looking for peer… (resolve failed, trying next)")
-        resolveNextIfNeeded()
+        // iOS often fails address resolve while the Bonjour name still works for NWConnection.
+        onStatus("Found peer — connecting…")
+        succeed(
+            NWEndpoint.service(
+                name: sender.name,
+                type: "_mdstickies._tcp",
+                domain: "local",
+                interface: nil
+            )
+        )
     }
 
     /// Prefer IPv4 host:port; fall back to Bonjour service endpoint.

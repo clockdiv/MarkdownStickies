@@ -9,6 +9,8 @@ final class StickyWindowManager: ObservableObject {
     @Published private(set) var activePath: String?
 
     private var controllers: [String: StickyWindowController] = [:]
+    /// Hibernated stickies per set index — set switch reuses these instead of rebuilding editors.
+    private var parkedBySet: [Int: [String: StickyWindowController]] = [:]
     private let stateStore: NoteStateStore
     private weak var noteStore: NoteStore?
 
@@ -24,10 +26,14 @@ final class StickyWindowManager: ObservableObject {
         controllers[path.path] != nil
     }
 
-    func open(note: Note) {
+    func open(note: Note, makeKey: Bool = true) {
         if let existing = controllers[note.path.path] {
             // Already open — focus only; don't bump list order.
-            existing.show()
+            if makeKey {
+                existing.show()
+            } else {
+                existing.wake(makeKey: false)
+            }
             return
         }
 
@@ -47,6 +53,7 @@ final class StickyWindowManager: ObservableObject {
             try? content.write(to: note.path, atomically: true, encoding: .utf8)
         }
 
+        // Open stickies are remembered on the active set’s layout (not note ownership).
         let state = stateStore.state(for: note.path)
         let controller = StickyWindowController(
             note: note,
@@ -58,7 +65,11 @@ final class StickyWindowManager: ObservableObject {
         openPaths.insert(note.path.path)
         stateStore.setOpen(note.path, isOpen: true)
         stateStore.touchLastOpened(note.path)
-        controller.show()
+        if makeKey {
+            controller.show()
+        } else {
+            controller.wake(makeKey: false)
+        }
         noteStore?.noteDidOpen(path: note.path)
     }
 
@@ -104,14 +115,79 @@ final class StickyWindowManager: ObservableObject {
         }
     }
 
+    /// Hibernate every sticky but keep them listed as open for the current set.
+    /// Controllers stay warm in `parkedBySet` so switching back is cheap.
+    func parkAllForSetSwitch() {
+        saveAllOpen()
+        let setIndex = stateStore.activeSet
+        let paths = Array(controllers.keys)
+        for path in paths {
+            if let controller = controllers[path] {
+                stateStore.setFrame(URL(fileURLWithPath: path), frame: controller.frame)
+            }
+        }
+        stateStore.replaceOpenPaths(paths, inSet: setIndex)
+
+        var bag: [String: StickyWindowController] = [:]
+        for path in paths {
+            guard let controller = controllers.removeValue(forKey: path) else { continue }
+            controller.hibernate()
+            bag[path] = controller
+        }
+        // Drop any stale parked entries for this set that are no longer open.
+        if let previous = parkedBySet[setIndex] {
+            for (path, controller) in previous where bag[path] == nil {
+                controller.closePreservingFile()
+            }
+        }
+        parkedBySet[setIndex] = bag
+        openPaths = []
+        activePath = nil
+    }
+
+    /// Switch open-layout set (0…9): park current stickies, restore the target set.
+    func switchToSet(_ index: Int) {
+        let next = NoteWindowState.clampedSetIndex(index)
+        guard next != stateStore.activeSet else { return }
+        parkAllForSetSwitch()
+        stateStore.setActiveSet(next)
+        stateStore.saveNow()
+        noteStore?.restoreActiveSetWindows()
+    }
+
     func restoreOpenNotes(from notes: [Note]) {
         let byPath = Dictionary(notes.map { ($0.path.path, $0) }, uniquingKeysWith: { _, new in new })
-        for pathString in stateStore.openPaths() {
-            if let note = byPath[pathString] {
-                open(note: note)
+        let setIndex = stateStore.activeSet
+        let planned = stateStore.openPaths(inSet: setIndex).compactMap { path -> (String, Note)? in
+            guard let note = byPath[path] else { return nil }
+            return (path, note)
+        }
+        var bag = parkedBySet.removeValue(forKey: setIndex) ?? [:]
+        var kept: [String] = []
+
+        for (index, item) in planned.enumerated() {
+            let pathString = item.0
+            let note = item.1
+            let isLast = index == planned.count - 1
+            if let hibernated = bag.removeValue(forKey: pathString) {
+                controllers[pathString] = hibernated
+                openPaths.insert(pathString)
+                hibernated.wake(makeKey: isLast)
+                kept.append(pathString)
             } else {
-                stateStore.setOpen(URL(fileURLWithPath: pathString), isOpen: false)
+                open(note: note, makeKey: isLast)
+                kept.append(pathString)
             }
+        }
+
+        // Controllers parked for paths that are no longer in this set.
+        for (_, leftover) in bag {
+            leftover.closePreservingFile()
+        }
+
+        stateStore.replaceOpenPaths(kept, inSet: setIndex)
+        if !kept.isEmpty {
+            NSApp.activate(ignoringOtherApps: true)
         }
     }
 
@@ -124,6 +200,11 @@ final class StickyWindowManager: ObservableObject {
 
     func reloadIfOpen(note: Note, content: String) {
         controllers[note.path.path]?.applyExternalContent(content)
+    }
+
+    /// Merge authority: replace open editor even if dirty, and invalidate in-flight saves.
+    func forceReloadIfOpen(note: Note, content: String) {
+        controllers[note.path.path]?.forceApplyExternalContent(content)
     }
 
     /// Refresh open previews (e.g. after image assets sync).
@@ -226,7 +307,7 @@ final class StickyWindowManager: ObservableObject {
             controllers.removeValue(forKey: path.path)
             openPaths.remove(path.path)
         }
-        let roots = noteStore?.bookmarks.effectiveScanURLs() ?? []
+        let roots = noteStore?.scanConfig.effectiveScanURLs() ?? []
         do {
             let trashed = try NoteFrontmatter.moveToTrash(file: path, roots: roots)
             stateStore.relocate(from: path, to: trashed)

@@ -1,0 +1,29 @@
+---
+description: Always ship macOS builds as Release to /Applications
+alwaysApply: true
+---
+
+# macOS build & install
+
+When building or relaunching the Mac app for this project:
+
+1. **Always** use `-configuration Release` (never Debug for the runnable app).
+2. **Always** install to `/Applications/MarkdownStickies.app` (replace the existing app).
+3. **Never** tell the user to run a Debug build from DerivedData, or leave them on a Debug binary elsewhere.
+4. After install: remove quarantine if needed, then `open /Applications/MarkdownStickies.app`.
+
+Typical sequence:
+
+```bash
+pkill -9 -f 'MarkdownStickies.app/Contents/MacOS/MarkdownStickies' 2>/dev/null || true
+xcodebuild -project MarkdownStickies.xcodeproj -scheme MarkdownStickies \
+  -configuration Release \
+  -derivedDataPath "$(pwd)/build/DerivedData-Release" build
+rm -rf /Applications/MarkdownStickies.app
+cp -R "$(pwd)/build/DerivedData-Release/Build/Products/Release/MarkdownStickies.app" \
+  /Applications/MarkdownStickies.app
+xattr -dr com.apple.quarantine /Applications/MarkdownStickies.app 2>/dev/null || true
+open /Applications/MarkdownStickies.app
+```
+
+iOS builds are separate and may use Debug for device/simulator as needed.

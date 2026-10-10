@@ -4,6 +4,8 @@ import UIKit
 
 struct NoteEditorView: View {
     let note: Note
+    var onBack: () -> Void
+    var onClosePane: () -> Void
 
     @EnvironmentObject private var vault: VaultStore
     @State private var showFrontmatter = false
@@ -14,85 +16,117 @@ struct NoteEditorView: View {
     @State private var saveTask: Task<Void, Never>?
     @State private var previewImageURL: URL?
     @State private var missingImageMessage: String?
+    /// True after the user changes text; load / chrome toggles must not mark dirty.
+    @State private var isDirty = false
+    @State private var isLoading = false
 
     var body: some View {
-        MarkdownSourceEditor(
-            text: $editorText,
-            noteDirectory: note.path.deletingLastPathComponent(),
-            onOpenURL: openImageURL
-        )
-            .navigationTitle(note.title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Button {
-                            toggleFrontmatter()
-                        } label: {
-                            Label(
-                                showFrontmatter ? "Hide Frontmatter" : "Show Frontmatter",
-                                systemImage: "curlybraces"
-                            )
-                        }
+        VStack(spacing: 0) {
+            PaneChrome(title: note.title) {
+                Button {
+                    saveIfNeeded()
+                    onBack()
+                } label: {
+                    Image(systemName: "chevron.backward")
+                }
+                .accessibilityLabel("Back")
+            } trailing: {
+                Menu {
+                    Button {
+                        toggleFrontmatter()
                     } label: {
-                        Image(systemName: "ellipsis.circle")
+                        Label(
+                            showFrontmatter ? "Hide Frontmatter" : "Show Frontmatter",
+                            systemImage: "curlybraces"
+                        )
                     }
-                    .accessibilityLabel("Note options")
-                }
-            }
-            .onAppear {
-                vault.acknowledgeInbound(for: note.path)
-                load()
-            }
-            .onChange(of: editorText) { _, _ in scheduleSave() }
-            .onDisappear {
-                saveTask?.cancel()
-                saveNow()
-            }
-            .fullScreenCover(isPresented: Binding(
-                get: { previewImageURL != nil },
-                set: { if !$0 { previewImageURL = nil } }
-            )) {
-                if let previewImageURL {
-                    ImageQuickLook(url: previewImageURL) {
-                        self.previewImageURL = nil
+                    Button(role: .destructive) {
+                        moveToTrash()
+                    } label: {
+                        Label("Move to Trash", systemImage: "trash")
                     }
-                    .ignoresSafeArea()
+                    Button {
+                        saveIfNeeded()
+                        onClosePane()
+                    } label: {
+                        Label("Close Pane", systemImage: "xmark.circle")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
                 }
+                .accessibilityLabel("Note options")
             }
-            .alert(
-                "Could not open",
-                isPresented: Binding(
-                    get: { loadError != nil },
-                    set: { if !$0 { loadError = nil } }
-                )
-            ) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text(loadError ?? "")
+
+            MarkdownSourceEditor(
+                text: $editorText,
+                noteDirectory: note.path.deletingLastPathComponent(),
+                onOpenURL: openImageURL
+            )
+        }
+        .background(Color(.systemBackground))
+        .onAppear {
+            vault.acknowledgeInbound(for: note.path)
+            load()
+        }
+        .onChange(of: editorText) { _, _ in
+            guard !isLoading else { return }
+            isDirty = true
+            scheduleSave()
+        }
+        .onDisappear {
+            saveTask?.cancel()
+            saveIfNeeded()
+        }
+        .fullScreenCover(isPresented: Binding(
+            get: { previewImageURL != nil },
+            set: { if !$0 { previewImageURL = nil } }
+        )) {
+            if let previewImageURL {
+                ImageQuickLook(url: previewImageURL) {
+                    self.previewImageURL = nil
+                }
+                .ignoresSafeArea()
             }
-            .alert(
-                "Could not save",
-                isPresented: Binding(
-                    get: { saveError != nil },
-                    set: { if !$0 { saveError = nil } }
-                )
-            ) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text(saveError ?? "")
-            }
-            .alert(
-                "Image not found",
-                isPresented: Binding(
-                    get: { missingImageMessage != nil },
-                    set: { if !$0 { missingImageMessage = nil } }
-                )
-            ) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text(missingImageMessage ?? "")
-            }
+        }
+        .alert(
+            "Could not open",
+            isPresented: Binding(
+                get: { loadError != nil },
+                set: { if !$0 { loadError = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(loadError ?? "")
+        }
+        .alert(
+            "Could not save",
+            isPresented: Binding(
+                get: { saveError != nil },
+                set: { if !$0 { saveError = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(saveError ?? "")
+        }
+        .alert(
+            "Image not found",
+            isPresented: Binding(
+                get: { missingImageMessage != nil },
+                set: { if !$0 { missingImageMessage = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(missingImageMessage ?? "")
+        }
+    }
+
+    private func moveToTrash() {
+        saveTask?.cancel()
+        vault.moveNoteToTrash(note)
+        onBack()
     }
 
     private func openImageURL(_ url: URL) {
@@ -118,7 +152,9 @@ struct NoteEditorView: View {
     private func presentDocument(_ full: String) {
         let parts = NoteFrontmatter.splitDocument(full)
         frontmatterPrefix = parts.prefix
+        isLoading = true
         editorText = showFrontmatter ? full : parts.body
+        isLoading = false
     }
 
     private func toggleFrontmatter() {
@@ -132,6 +168,7 @@ struct NoteEditorView: View {
             let raw = try String(contentsOf: note.path, encoding: .utf8)
             let ensured = NoteFrontmatter.ensuringSyncID(raw)
             presentDocument(ensured.markdown)
+            isDirty = false
             if ensured.didChange {
                 let previous = try note.path.resourceValues(forKeys: [.contentModificationDateKey])
                     .contentModificationDate
@@ -154,17 +191,19 @@ struct NoteEditorView: View {
         saveTask = Task {
             try? await Task.sleep(nanoseconds: 600_000_000)
             guard !Task.isCancelled else { return }
-            saveNow()
+            saveIfNeeded()
         }
     }
 
-    private func saveNow() {
+    private func saveIfNeeded() {
+        guard isDirty else { return }
         do {
             let full = fullDocument
             try full.write(to: note.path, atomically: true, encoding: .utf8)
             if showFrontmatter {
                 frontmatterPrefix = NoteFrontmatter.splitDocument(full).prefix
             }
+            isDirty = false
             saveError = nil
             vault.rescan()
         } catch {

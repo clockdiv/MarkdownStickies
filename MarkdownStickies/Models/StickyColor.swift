@@ -140,6 +140,24 @@ extension NSColor {
         self.init(calibratedRed: r, green: g, blue: b, alpha: 1)
     }
 
+    /// Stable `#rrggbb` for persistence / HTML (handles catalog & calibrated colors).
+    var reliableHexString: String {
+        let rgb = usingColorSpace(.deviceRGB)
+            ?? usingColorSpace(.sRGB)
+            ?? self
+        var r: CGFloat = 1
+        var g: CGFloat = 1
+        var b: CGFloat = 0.6
+        var a: CGFloat = 1
+        rgb.getRed(&r, green: &g, blue: &b, alpha: &a)
+        return String(
+            format: "#%02x%02x%02x",
+            Int((r * 255).rounded()),
+            Int((g * 255).rounded()),
+            Int((b * 255).rounded())
+        )
+    }
+
     /// Darken / punch up a pastel so it reads on a light-gray canvas.
     var listSwatchDerived: NSColor {
         let rgb = usingColorSpace(.deviceRGB) ?? usingColorSpace(.sRGB) ?? self

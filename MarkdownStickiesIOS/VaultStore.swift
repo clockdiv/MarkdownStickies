@@ -33,8 +33,11 @@ final class VaultStore: ObservableObject {
 
     private let bookmarkKey = "vaultFolderBookmark"
     private static let deviceNameKey = "deviceDisplayName"
+    private static let lastOpenedKey = "vaultNoteLastOpened"
     private var isAccessing = false
     private var didStart = false
+    /// Path → last time the user opened the note (not last save).
+    private var lastOpenedAt: [String: Date] = [:]
 
     var filteredNotes: [Note] {
         let query = filterText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -66,6 +69,7 @@ final class VaultStore: ObservableObject {
         let syncService = LanSyncService(deviceName: resolved)
         self.syncService = syncService
         self.deviceDisplayName = resolved
+        lastOpenedAt = Self.loadLastOpened()
         configureSync()
         // Do not restore/scan/advertise here — that blocked launch on the main thread.
     }
@@ -120,17 +124,26 @@ final class VaultStore: ObservableObject {
     private func configureSync() {
         syncService.catalogProvider = { [weak self] in
             guard let self, let root = self.rootURL else { return [] }
-            return SyncCatalogBuilder.catalog(roots: [root])
+            return SyncCatalogBuilder.catalog(roots: [root], config: ScanConfig.load())
         }
         syncService.syncRootsProvider = { [weak self] in
             guard let root = self?.rootURL else { return [] }
             return [root]
         }
-        syncService.onApplyRemoteCatalog = { [weak self] remote in
-            self?.applyRemoteCatalog(remote) ?? .empty
+        syncService.onApplyRemoteCatalog = { [weak self] remote, peerLabel in
+            self?.applyRemoteCatalog(remote, peerLabel: peerLabel) ?? .empty
         }
         syncService.onExchangeFinished = { [weak self] result, role in
             self?.presentSyncResult(result, role: role)
+        }
+        syncService.onProgress = { [weak self] feedback in
+            self?.syncBanner = feedback
+        }
+        syncService.onRemoteBannerDismiss = { [weak self] in
+            self?.syncBanner = nil
+        }
+        syncService.onRemoteMergeCancel = { [weak self] in
+            self?.syncBanner = nil
         }
     }
 
@@ -142,6 +155,12 @@ final class VaultStore: ObservableObject {
         // iOS must stay discoverable so Mac→iOS sync can find this device.
         syncService.requestLocalNetworkAuthorization()
         syncService.startAdvertising()
+    }
+
+    /// Call when the app returns to the foreground — Bonjour often goes stale after sleep.
+    func ensureDiscoverable() {
+        guard rootURL != nil else { return }
+        syncService.ensureAdvertisingFresh()
     }
 
     func stopAccessingIfNeeded() {
@@ -197,15 +216,27 @@ final class VaultStore: ObservableObject {
         isScanning = true
         let scanRoot = root
         Task.detached(priority: .userInitiated) {
-            let scanned = NoteScanner.scan(roots: [scanRoot])
+            let scanned = NoteScanner.scan(roots: [scanRoot], config: ScanConfig.load())
                 .filter { !NoteFrontmatter.isTrashed(file: $0.path) }
             await MainActor.run {
                 // Ignore stale results if the folder changed mid-scan.
                 guard self.rootURL?.standardizedFileURL == scanRoot.standardizedFileURL else { return }
-                self.notes = Self.sortedNotes(scanned, inbound: self.syncInboundPaths)
+                self.notes = Self.sortedNotes(
+                    scanned,
+                    inbound: self.syncInboundPaths,
+                    lastOpened: self.lastOpenedAt
+                )
                 self.isScanning = false
             }
         }
+    }
+
+    /// Call when the user opens a note (not on save / swipe-away).
+    func touchLastOpened(_ path: URL) {
+        let key = path.standardizedFileURL.path
+        lastOpenedAt[key] = Date()
+        Self.persistLastOpened(lastOpenedAt)
+        notes = Self.sortedNotes(notes, inbound: syncInboundPaths, lastOpened: lastOpenedAt)
     }
 
     /// Moves a note into the vault `Trash/` folder so the next sync propagates the delete.
@@ -225,7 +256,13 @@ final class VaultStore: ObservableObject {
             return
         }
         lastError = nil
-        syncBanner = nil
+        syncBanner = SyncFeedback.progress(
+            title: "Syncing",
+            message: "Looking for peer…",
+            startedAt: Date(),
+            timeoutSeconds: 20,
+            debugCode: "sync:looking"
+        )
         do {
             _ = try await syncService.syncWithPeer()
         } catch {
@@ -254,7 +291,17 @@ final class VaultStore: ObservableObject {
     }
 
     func dismissSyncBanner() {
+        if syncBanner?.debugCode == "sync:await-mac-merge" {
+            // Sync Later — cancel merge session on Mac too; leave note bodies unchanged.
+            syncBanner = nil
+            syncService.notifyPeerCancelMerge()
+            return
+        }
+        let shouldNotifyPeer = syncBanner?.kind == .success
         syncBanner = nil
+        if shouldNotifyPeer {
+            syncService.notifyPeerDismissBanner()
+        }
     }
 
     /// User opened a note — drop the “received” badge (they’ve seen the new content).
@@ -278,7 +325,10 @@ final class VaultStore: ObservableObject {
         )
         syncBanner = feedback
         syncService.setStatus(feedback.statusLine)
-        if feedback.kind == .success {
+        if feedback.kind == .success
+            || feedback.debugCode == "sync:conflicts"
+            || feedback.debugCode == "sync:await-mac-merge"
+        {
             lastError = nil
         }
 
@@ -293,7 +343,10 @@ final class VaultStore: ObservableObject {
     }
 
     @discardableResult
-    private func applyRemoteCatalog(_ remote: [SyncNotePayload]) -> SyncApplyAck {
+    private func applyRemoteCatalog(
+        _ remote: [SyncNotePayload],
+        peerLabel: String?
+    ) -> SyncApplyAck {
         guard let root = rootURL else {
             return SyncApplyAck(errorDescription: "No folder")
         }
@@ -301,29 +354,74 @@ final class VaultStore: ObservableObject {
             let result = try SyncCatalogBuilder.applyRemoteCatalog(
                 remote,
                 roots: [root],
-                createDirectory: root
+                createDirectory: root,
+                peerLabel: peerLabel ?? "Mac",
+                conflictRole: .satellite
             )
 
             // Replace marks from this exchange only — blues not re-sent disappear.
             syncInboundPaths = Set(result.appliedPaths.map { $0.standardizedFileURL.path })
+            let receivedAt = Date()
+            for path in result.appliedPaths {
+                lastOpenedAt[path.standardizedFileURL.path] = receivedAt
+            }
+            if !result.appliedPaths.isEmpty {
+                Self.persistLastOpened(lastOpenedAt)
+            }
             rescan()
-            return SyncApplyAck(appliedIDs: result.appliedIDs)
+            return SyncApplyAck(
+                appliedIDs: result.appliedIDs,
+                conflicts: result.conflicts,
+                awaitingAuthorityMerge: result.awaitingAuthorityMerge
+            )
         } catch {
             lastError = "Could not apply sync: \(error.localizedDescription)"
             return SyncApplyAck(errorDescription: error.localizedDescription)
         }
     }
 
-    private static func sortedNotes(_ notes: [Note], inbound: Set<String>) -> [Note] {
+    /// Recent opens first; never-opened notes fall back to file modification date.
+    /// Inbound sync notes are open-touched so they float to the top.
+    private static func sortedNotes(
+        _ notes: [Note],
+        inbound: Set<String>,
+        lastOpened: [String: Date]
+    ) -> [Note] {
         notes.sorted { lhs, rhs in
-            let leftInbound = inbound.contains(lhs.path.standardizedFileURL.path)
-            let rightInbound = inbound.contains(rhs.path.standardizedFileURL.path)
+            let leftKey = lhs.path.standardizedFileURL.path
+            let rightKey = rhs.path.standardizedFileURL.path
+            let leftInbound = inbound.contains(leftKey)
+            let rightInbound = inbound.contains(rightKey)
             if leftInbound != rightInbound { return leftInbound && !rightInbound }
+
+            let leftOpened = lastOpened[leftKey]
+            let rightOpened = lastOpened[rightKey]
+            switch (leftOpened, rightOpened) {
+            case let (l?, r?):
+                if l != r { return l > r }
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            case (nil, nil):
+                break
+            }
             if lhs.modifiedAt != rhs.modifiedAt {
                 return lhs.modifiedAt > rhs.modifiedAt
             }
             return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
         }
+    }
+
+    private static func loadLastOpened() -> [String: Date] {
+        guard let raw = UserDefaults.standard.dictionary(forKey: lastOpenedKey) as? [String: Double]
+        else { return [:] }
+        return raw.mapValues { Date(timeIntervalSince1970: $0) }
+    }
+
+    private static func persistLastOpened(_ map: [String: Date]) {
+        let raw = map.mapValues { $0.timeIntervalSince1970 }
+        UserDefaults.standard.set(raw, forKey: lastOpenedKey)
     }
 
     private func restoreBookmark() {

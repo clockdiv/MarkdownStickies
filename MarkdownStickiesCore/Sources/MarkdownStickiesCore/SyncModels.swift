@@ -26,11 +26,15 @@ public struct SyncWireMessage: Codable, Equatable, Sendable {
         case assetOffers
         /// One or more image payloads; empty array = end of transfer (protocol ≥ 3).
         case assetBlobs
+        /// Peer dismissed their sync result card — clear ours too (protocol ≥ 4).
+        case dismissBanner
+        /// Abort merge session on both devices; leave note bodies unchanged (protocol ≥ 5).
+        case cancelMerge
     }
 
     /// Bump when the wire shape changes in a breaking way.
-    /// v2 = catalog apply ACK; v3 = post-catalog image asset exchange.
-    public static let currentProtocolVersion = 3
+    /// v2 = catalog apply ACK; v3 = image assets; v4 = dismiss banner; v5 = cancel merge.
+    public static let currentProtocolVersion = 5
 
     public var kind: Kind
     public var peerID: UUID?
@@ -96,19 +100,67 @@ public struct SyncWireMessage: Codable, Equatable, Sendable {
     public static func assetBlobs(_ blobs: [SyncAssetBlob]) -> SyncWireMessage {
         SyncWireMessage(kind: .assetBlobs, assetBlobs: blobs)
     }
+
+    public static func dismissBanner() -> SyncWireMessage {
+        SyncWireMessage(kind: .dismissBanner, protocolVersion: currentProtocolVersion)
+    }
+
+    public static func cancelMerge() -> SyncWireMessage {
+        SyncWireMessage(kind: .cancelMerge, protocolVersion: currentProtocolVersion)
+    }
 }
 
 /// Result of applying a remote catalog (returned to the sync engine for ACKs).
 public struct SyncApplyAck: Equatable, Sendable {
     public var appliedIDs: [UUID]
     public var errorDescription: String?
+    /// Same-id notes with divergent bodies — local kept, remote saved as a sibling (merge authority).
+    public var conflicts: [SyncConflict]
+    /// Satellite kept its local edit; Mac must merge (no sibling written here).
+    public var awaitingAuthorityMerge: [SyncConflict]
 
-    public init(appliedIDs: [UUID] = [], errorDescription: String? = nil) {
+    public init(
+        appliedIDs: [UUID] = [],
+        errorDescription: String? = nil,
+        conflicts: [SyncConflict] = [],
+        awaitingAuthorityMerge: [SyncConflict] = []
+    ) {
         self.appliedIDs = appliedIDs
         self.errorDescription = errorDescription
+        self.conflicts = conflicts
+        self.awaitingAuthorityMerge = awaitingAuthorityMerge
     }
 
     public static let empty = SyncApplyAck()
+}
+
+/// A same-id content conflict preserved as two notes (keep-both).
+public struct SyncConflict: Equatable, Sendable, Identifiable {
+    /// Contested sync id (still on the local file that was kept).
+    public var id: UUID
+    public var local: SyncNotePayload
+    public var remote: SyncNotePayload
+    /// New id assigned to the sibling that holds the remote body.
+    public var remoteCopyID: UUID
+    /// Path of the sibling file written for the remote body (nil if remote body already existed locally).
+    public var remoteCopyPath: URL?
+    public var peerLabel: String
+
+    public init(
+        id: UUID,
+        local: SyncNotePayload,
+        remote: SyncNotePayload,
+        remoteCopyID: UUID,
+        remoteCopyPath: URL? = nil,
+        peerLabel: String
+    ) {
+        self.id = id
+        self.local = local
+        self.remote = remote
+        self.remoteCopyID = remoteCopyID
+        self.remoteCopyPath = remoteCopyPath
+        self.peerLabel = peerLabel
+    }
 }
 
 /// Full sync exchange including peer confirmation of our outbound notes.
@@ -127,6 +179,10 @@ public struct SyncExchangeResult: Equatable, Sendable {
     public var imagesReceived: Int
     /// Images we sent to the peer this session (protocol ≥ 3).
     public var imagesSent: Int
+    /// Content conflicts resolved via keep-both this session (merge authority).
+    public var conflicts: [SyncConflict]
+    /// Satellite deferred merges — waiting for Mac (no local sibling written).
+    public var awaitingAuthorityMerge: [SyncConflict]
 
     public init(
         remoteNotes: [SyncNotePayload],
@@ -136,7 +192,9 @@ public struct SyncExchangeResult: Equatable, Sendable {
         peerSupportsAck: Bool,
         peerDeviceName: String? = nil,
         imagesReceived: Int = 0,
-        imagesSent: Int = 0
+        imagesSent: Int = 0,
+        conflicts: [SyncConflict] = [],
+        awaitingAuthorityMerge: [SyncConflict] = []
     ) {
         self.remoteNotes = remoteNotes
         self.peerAppliedIDs = peerAppliedIDs
@@ -146,6 +204,8 @@ public struct SyncExchangeResult: Equatable, Sendable {
         self.peerDeviceName = peerDeviceName
         self.imagesReceived = imagesReceived
         self.imagesSent = imagesSent
+        self.conflicts = conflicts
+        self.awaitingAuthorityMerge = awaitingAuthorityMerge
     }
 
     /// True when the peer no longer needs any of our notes (or we cannot tell without ACK).
@@ -157,30 +217,78 @@ public struct SyncExchangeResult: Equatable, Sendable {
 }
 
 public enum SyncMerge {
-    public enum Decision: Equatable, Sendable {
-        /// Remote is newer (or local missing) — write remote body.
-        case applyRemote(SyncNotePayload)
-        /// Local is newer, equal, or identical — keep local file as-is.
-        case keepLocal
+    /// Who may create keep-both siblings and run merge UI.
+    public enum ConflictRole: String, Equatable, Sendable {
+        /// Mac — preserve peer body as sibling for merge.
+        case mergeAuthority
+        /// iOS — keep local edit; wait for Mac merge (no “from Mac” sibling).
+        case satellite
     }
 
-    /// Prefer newer mtime. Identical bodies skip content transfer, but still converge
-    /// divergent titles with a deterministic winner (avoids A↔B rename ping-pong).
-    /// Equal mtime + different bodies also converge deterministically (e.g. `created_on`
-    /// renamed on one peer while content already matched).
+    public enum Decision: Equatable, Sendable {
+        /// Remote is missing locally, or title-only rename — write / rename remote.
+        case applyRemote(SyncNotePayload)
+        /// Local is fine as-is (identical, or already has remote content).
+        case keepLocal
+        /// Same id, divergent bodies — never silent overwrite.
+        case conflict(local: SyncNotePayload, remote: SyncNotePayload)
+    }
+
+    /// Divergent bodies → conflict, unless trash intent or an explicit conflict merge wins.
+    /// Identical bodies may still converge titles.
     public static func decide(local: SyncNotePayload?, remote: SyncNotePayload) -> Decision {
         guard let local else { return .applyRemote(remote) }
         if local.body == remote.body {
             return decideTitleOnly(local: local, remote: remote)
         }
 
+        // Trash is local-only (never in wire catalogs). If we still see a trashed local,
+        // keep it — do not restore/overwrite from the peer.
+        if NoteFrontmatter.isTrashFolder(NoteFrontmatter.folder(in: local.body)) {
+            return .keepLocal
+        }
+        if NoteFrontmatter.isTrashFolder(NoteFrontmatter.folder(in: remote.body)) {
+            return .keepLocal
+        }
+
+        if let resolved = decideByConflictResolved(local: local, remote: remote) {
+            return resolved
+        }
+
+        return .conflict(local: local, remote: remote)
+    }
+
+    /// User merge stamps `conflict_resolved`. That side is authoritative until the peer
+    /// also carries a resolve stamp (then newer stamp wins; equal stamps + divergent bodies
+    /// become a new conflict). Do **not** require mtime — phone clocks / touches must not
+    /// block applying a Mac merge.
+    private static func decideByConflictResolved(
+        local: SyncNotePayload,
+        remote: SyncNotePayload
+    ) -> Decision? {
+        let localAt = NoteFrontmatter.conflictResolvedAt(in: local.body)
+        let remoteAt = NoteFrontmatter.conflictResolvedAt(in: remote.body)
+        switch (localAt, remoteAt) {
+        case (nil, nil):
+            return nil
+        case (nil, _?):
+            return .applyRemote(remote)
+        case (_?, nil):
+            return .keepLocal
+        case (let localResolved?, let remoteResolved?):
+            if remoteResolved > localResolved { return .applyRemote(remote) }
+            if localResolved > remoteResolved { return .keepLocal }
+            return .conflict(local: local, remote: remote)
+        }
+    }
+
+    private static func decideByMtime(local: SyncNotePayload, remote: SyncNotePayload) -> Decision {
         let remoteSec = floor(remote.modifiedAt.timeIntervalSince1970)
         let localSec = floor(local.modifiedAt.timeIntervalSince1970)
         if remoteSec > localSec { return .applyRemote(remote) }
         if remoteSec < localSec { return .keepLocal }
         if remote.modifiedAt > local.modifiedAt { return .applyRemote(remote) }
         if remote.modifiedAt < local.modifiedAt { return .keepLocal }
-        // Equal mtime, different bodies → stable winner on both peers.
         if remote.body > local.body { return .applyRemote(remote) }
         return .keepLocal
     }
@@ -211,17 +319,21 @@ public enum SyncMerge {
         remote.map { decide(local: localByID[$0.id], remote: $0) }
     }
 
-    /// IDs from `ours` that the peer would accept (missing there, or our body newer).
+    /// IDs from `ours` that the peer still needs (missing there, or title-only rename).
+    /// Divergent same-id bodies are **not** outbound: keep-both already preserved both sides
+    /// until an explicit merge (`conflict_resolved`); counting them made both devices warn forever.
     public static func outboundIDs(
         ours: [SyncNotePayload],
         theirs: [SyncNotePayload]
     ) -> [UUID] {
         let theirByID = Dictionary(uniqueKeysWithValues: theirs.map { ($0.id, $0) })
         return ours.compactMap { our in
-            if case .applyRemote = decide(local: theirByID[our.id], remote: our) {
+            switch decide(local: theirByID[our.id], remote: our) {
+            case .applyRemote:
                 return our.id
+            case .keepLocal, .conflict:
+                return nil
             }
-            return nil
         }
     }
 }

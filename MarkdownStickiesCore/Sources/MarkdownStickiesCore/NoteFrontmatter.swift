@@ -19,11 +19,17 @@ public enum NoteFrontmatter {
     public static let idKey = "id"
     public static let folderKey = "folder"
     public static let createdOnKey = "created_on"
+    /// Set when the user merges a sync conflict — peers must apply this body for the same `id`.
+    public static let conflictResolvedKey = "conflict_resolved"
+    /// Mac keep-both copy of a peer body — local merge aide only; never syncs to peers.
+    public static let conflictSiblingKey = "conflict_sibling"
     /// Legacy key — no longer written; kept for reading old files.
     public static let titleKey = "title"
 
     /// Preferred field order inside the frontmatter block.
-    private static let preferredKeyOrder = [idKey, createdOnKey, folderKey]
+    private static let preferredKeyOrder = [
+        idKey, createdOnKey, conflictResolvedKey, conflictSiblingKey, folderKey
+    ]
 
     /// UUID from leading frontmatter `id`, if present and valid.
     public static func syncID(in markdown: String) -> UUID? {
@@ -88,6 +94,51 @@ public enum NoteFrontmatter {
         }
         let updated = upsert(idKey, value: preferredID.uuidString, in: markdown)
         return (updated, preferredID, true)
+    }
+
+    /// Force a specific sync `id` into frontmatter (creates frontmatter if needed).
+    public static func settingSyncID(_ id: UUID, in markdown: String) -> String {
+        let ensured = ensuringSyncID(markdown, id: id).markdown
+        return upsert(idKey, value: id.uuidString, in: ensured)
+    }
+
+    /// Body equality for conflict de-dupe — ignores sync `id` and merge markers.
+    public static func contentFingerprint(_ markdown: String) -> String {
+        var text = removingField(idKey, in: markdown)
+        text = removingField(conflictResolvedKey, in: text)
+        text = removingField(conflictSiblingKey, in: text)
+        return text
+    }
+
+    /// Keep-both sibling written only on the merge authority — excluded from LAN catalogs.
+    public static func isConflictSibling(_ markdown: String) -> Bool {
+        field(conflictSiblingKey, in: markdown) != nil
+    }
+
+    /// Marks a local-only conflict copy. `primaryID` is the contested note’s sync id.
+    public static func markingConflictSibling(_ primaryID: UUID, in markdown: String) -> String {
+        let text = ensuringSyncID(markdown).markdown
+        return upsert(conflictSiblingKey, value: primaryID.uuidString, in: text)
+    }
+
+    /// When the user last merged/resolved a conflict for this note (if stamped).
+    public static func conflictResolvedAt(in markdown: String) -> Date? {
+        guard let value = field(conflictResolvedKey, in: markdown) else { return nil }
+        let trimmed = stripQuotes(value).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let interval = Double(trimmed) else { return nil }
+        return Date(timeIntervalSince1970: interval)
+    }
+
+    /// Marks this body as the authoritative post-merge version for sync.
+    public static func settingConflictResolved(_ date: Date = Date(), in markdown: String) -> String {
+        let text = ensuringSyncID(markdown).markdown
+        let value = String(format: "%.3f", date.timeIntervalSince1970)
+        return upsert(conflictResolvedKey, value: value, in: text)
+    }
+
+    /// Drop merge authority — any local edit invalidates a prior resolve stamp.
+    public static func clearingConflictResolved(_ markdown: String) -> String {
+        removingField(conflictResolvedKey, in: markdown)
     }
 
     /// On open/focus: ensure a stable `id` only.

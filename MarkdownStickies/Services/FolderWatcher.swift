@@ -5,9 +5,9 @@ import CoreServices
 final class FolderWatcher: @unchecked Sendable {
     private var stream: FSEventStreamRef?
     private let callbackQueue = DispatchQueue(label: "MarkdownStickies.FolderWatcher")
-    private var onChange: (@Sendable () -> Void)?
+    private var onChange: (@Sendable ([String]) -> Void)?
 
-    func start(roots: [URL], onChange: @escaping @Sendable () -> Void) {
+    func start(roots: [URL], onChange: @escaping @Sendable ([String]) -> Void) {
         stop()
         self.onChange = onChange
 
@@ -22,10 +22,18 @@ final class FolderWatcher: @unchecked Sendable {
             copyDescription: nil
         )
 
-        let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
+        let callback: FSEventStreamCallback = { _, info, numEvents, eventPaths, _, _ in
             guard let info else { return }
             let watcher = Unmanaged<FolderWatcher>.fromOpaque(info).takeUnretainedValue()
-            watcher.onChange?()
+            let cfPaths = Unmanaged<CFArray>.fromOpaque(eventPaths).takeUnretainedValue()
+            var paths: [String] = []
+            paths.reserveCapacity(numEvents)
+            for index in 0..<numEvents {
+                if let path = CFArrayGetValueAtIndex(cfPaths, index) {
+                    paths.append(Unmanaged<CFString>.fromOpaque(path).takeUnretainedValue() as String)
+                }
+            }
+            watcher.onChange?(paths)
         }
 
         stream = FSEventStreamCreate(
