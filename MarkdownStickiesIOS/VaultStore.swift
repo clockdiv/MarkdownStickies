@@ -172,6 +172,18 @@ final class VaultStore: ObservableObject {
         sync.syncNow()
     }
 
+    /// Settings → Start Fresh: the next sync treats this folder as new (no deletes anywhere).
+    func startSyncFresh() {
+        guard let root = rootURL else { return }
+        do {
+            try VaultScanner.forgetInfo(vault: root, storage: Self.storage)
+            vaultInfo = nil
+            sync.dismissResult()
+        } catch {
+            lastError = "Could not reset sync: \(error.localizedDescription)"
+        }
+    }
+
     func cancelSync() {
         sync.cancel()
     }

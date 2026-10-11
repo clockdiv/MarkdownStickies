@@ -4,6 +4,7 @@ struct SettingsView: View {
     @EnvironmentObject private var vault: VaultStore
     @Environment(\.dismiss) private var dismiss
     @Binding var isPickingFolder: Bool
+    @State private var confirmingFreshStart = false
 
     var body: some View {
         List {
@@ -55,6 +56,16 @@ struct SettingsView: View {
                 Text("Shown on the Mac during syncs and used for created_on on new notes. iOS hides the personal device name unless you set it here.")
             }
 
+            if vault.rootURL != nil {
+                Section {
+                    Button("Start Fresh on This Device…") { confirmingFreshStart = true }
+                } header: {
+                    Text("Sync")
+                } footer: {
+                    Text("Use this after deleting or renaming folders here. The next sync treats this folder as new: nothing is deleted on the Mac or here, and the Mac sends its notes again.")
+                }
+            }
+
             if let warning = vault.folderWarning {
                 Section("Notes Folder Location") {
                     Text(warning)
@@ -62,6 +73,16 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+        }
+        .confirmationDialog(
+            "Start sync fresh on this device?",
+            isPresented: $confirmingFreshStart,
+            titleVisibility: .visible
+        ) {
+            Button("Start Fresh") { vault.startSyncFresh() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Nothing is deleted. The next sync copies the Mac's notes into this folder again; notes that differ get a conflict copy.")
         }
         .navigationTitle("Settings")
         .navigationBarTitleDisplayMode(.inline)

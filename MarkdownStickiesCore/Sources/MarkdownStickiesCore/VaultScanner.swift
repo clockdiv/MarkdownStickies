@@ -60,6 +60,15 @@ public enum VaultScanner {
         return info
     }
 
+    /// Forgets what the app knew about this vault. The next sync is a first sync for a new
+    /// vault: nothing is deleted on either device, and the Mac sends its notes again.
+    public static func forgetInfo(vault: URL, storage: URL) throws {
+        let url = infoURL(vault: vault, storage: storage)
+        if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+    }
+
     public static func saveInfo(_ info: VaultInfo, vault: URL, storage: URL) throws {
         let url = infoURL(vault: vault, storage: storage)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)

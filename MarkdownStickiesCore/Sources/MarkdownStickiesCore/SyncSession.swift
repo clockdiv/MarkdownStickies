@@ -505,7 +505,7 @@ public enum IOSSyncResponder {
             do {
                 info = try VaultScanner.applyingRoots(prepare.roots, to: info, vault: vault)
             } catch VaultScanner.Failure.missingRootFolder(let name) {
-                let message = "Folder '\(name)' is missing on \(configuration.deviceName). Restore it in the Files app, or remove its folder from Sync on the Mac."
+                let message = "Folder '\(name)' is missing on \(configuration.deviceName). Restore it in the Files app, or choose Settings → Start Fresh on \(configuration.deviceName). Don't recreate it empty: that counts as deleting its notes."
                 try? await connection.send(.abort(message))
                 throw SessionAbort(message: message)
             }

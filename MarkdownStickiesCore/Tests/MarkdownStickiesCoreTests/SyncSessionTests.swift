@@ -347,3 +347,23 @@ private final class Counter: @unchecked Sendable {
         return value
     }
 }
+
+extension SyncSessionTests {
+    func testStartingFreshAfterDeletingTheRootFolderDeletesNothing() async throws {
+        let a = UUID()
+        try FileManager.default.createDirectory(at: macRoot, withIntermediateDirectories: true)
+        try Data(("---\nstickies-id: \(a.uuidString)\n---\n\nkeep me\n").utf8).write(to: macRoot.appendingPathComponent("idea.md"))
+        _ = await sync()
+        try FileManager.default.removeItem(at: vault.appendingPathComponent("Project"))
+
+        let blocked = await sync()
+        guard case .failed = blocked.mac else { return XCTFail("expected the missing-folder stop") }
+
+        try VaultScanner.forgetInfo(vault: vault, storage: dir.appendingPathComponent("ios-storage"))
+        let fresh = await sync()
+        XCTAssertEqual(fresh.macSummary?.isFirstSync, true)
+        XCTAssertEqual(fresh.macSummary?.trashed, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: macRoot.appendingPathComponent("idea.md").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: vault.appendingPathComponent("Project/idea.md").path))
+    }
+}
