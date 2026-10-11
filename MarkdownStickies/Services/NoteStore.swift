@@ -236,6 +236,75 @@ final class NoteStore: ObservableObject {
         return index >= 0 && index < min(peers.count, 3) ? peers[index] : nil
     }
 
+    // MARK: - Conflict copies and merge
+
+    @Published var mergeRequest: MergeRequest?
+    /// Filled at each rescan: paths of conflict copies, and ids that have a conflict copy.
+    @Published private(set) var conflictCopyPaths: Set<String> = []
+    @Published private(set) var idsWithConflictCopies: Set<UUID> = []
+
+    func isConflictCopy(_ note: Note) -> Bool {
+        conflictCopyPaths.contains(note.path.path)
+    }
+
+    /// The note a conflict copy belongs to, if it's in the list.
+    func originalNote(ofConflictCopy note: Note) -> Note? {
+        guard let originalID = idIndex.entry(for: note.path).conflictOf else { return nil }
+        return notes.first { idIndex.entry(for: $0.path).id == originalID }
+    }
+
+    func hasConflictCopy(_ note: Note) -> Bool {
+        guard !idsWithConflictCopies.isEmpty, let id = idIndex.entry(for: note.path).id else { return false }
+        return idsWithConflictCopies.contains(id)
+    }
+
+    /// Opens the merge view for a conflict copy (after saving open stickies).
+    func requestMerge(copy: Note) {
+        Task { @MainActor in
+            await windowManager.saveAllOpenAndWait()
+            guard let original = originalNote(ofConflictCopy: copy),
+                  let originalData = try? Data(contentsOf: original.path),
+                  let copyData = try? Data(contentsOf: copy.path)
+            else {
+                lastError = "The original of “\(copy.title)” wasn’t found. Edit or delete the copy by hand."
+                return
+            }
+            mergeRequest = MergeRequest(original: original, copy: copy, originalData: originalData, copyData: copyData)
+        }
+    }
+
+    /// Writes the merged body into the original (keeping its frontmatter; the previous version
+    /// goes to Backups) and moves the copy to the Trash. Returns an error text, or nil.
+    func saveMerge(_ request: MergeRequest, body: String) -> String? {
+        let originalText = String(decoding: request.originalData, as: UTF8.self)
+        let prefix = NoteFrontmatter.splitDocument(originalText).prefix
+        var merged = NoteFrontmatter.joinDocument(prefix: prefix, body: body)
+        if !merged.hasSuffix("\n") { merged += "\n" }
+        do {
+            try writer.write(
+                Data(merged.utf8),
+                to: request.original.path,
+                expect: .hash(NoteHashing.fileHash(request.originalData)),
+                origin: .app
+            )
+            idIndex.invalidate(request.original.path)
+            noteFileDidSave(path: request.original.path, modifiedAt: Date())
+        } catch NoteWriter.Failure.changedOnDisk, NoteWriter.Failure.missing {
+            return "“\(request.original.title)” changed since the merge view opened. Nothing was saved; open the merge again."
+        } catch {
+            return error.localizedDescription
+        }
+        windowManager.close(path: request.copy.path)
+        do {
+            try writer.trash(request.copy.path, expectHash: NoteHashing.fileHash(request.copyData), origin: .app)
+        } catch {
+            lastError = "The merge was saved, but the copy couldn’t be moved to the Trash: \(error.localizedDescription)"
+        }
+        mergeRequest = nil
+        rescan(restoreWindows: false)
+        return nil
+    }
+
     // MARK: - Notes
 
     func openNote(_ note: Note) {
@@ -351,6 +420,16 @@ final class NoteStore: ObservableObject {
         let openIDs = windowManager.openNoteIDs()
         notes = scanned
         stateStore.migrateLegacyKeys(for: scanned.map(\.path))
+        var copies = Set<String>()
+        var originals = Set<UUID>()
+        for note in scanned {
+            if let original = idIndex.entry(for: note.path).conflictOf {
+                copies.insert(note.path.path)
+                originals.insert(original)
+            }
+        }
+        conflictCopyPaths = copies
+        idsWithConflictCopies = originals
         sortNotes()
 
         let newPaths = Set(scanned.map(\.path.path))

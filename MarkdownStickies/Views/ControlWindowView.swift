@@ -29,6 +29,13 @@ struct ControlWindowView: View {
         }
         .frame(minWidth: 340, idealWidth: 380, minHeight: 460, idealHeight: 520)
         .background(Self.canvas)
+        .sheet(item: $store.mergeRequest) { request in
+            MergeView(
+                request: request,
+                onSave: { store.saveMerge(request, body: $0) },
+                onCancel: { store.mergeRequest = nil }
+            )
+        }
         .overlay {
             if store.sync.state != .idle {
                 SyncBannerOverlay(
@@ -205,6 +212,11 @@ struct ControlWindowView: View {
                         onOpen: { store.openNote(note) }
                     )
                     .contextMenu {
+                        if store.isConflictCopy(note) {
+                            Button("Merge with Original…") {
+                                store.requestMerge(copy: note)
+                            }
+                        }
                         if store.canRemoveFromRecents(note) {
                             Button("Remove from Recents") {
                                 store.removeFromRecents(note)
@@ -784,6 +796,16 @@ private struct NoteListRow: View {
                             .lineLimit(1)
                             .frame(maxWidth: .infinity, alignment: .leading)
 
+                        if store.isConflictCopy(note) {
+                            Text("Conflict copy")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.orange)
+                                .help("Right-click → Merge with Original…")
+                        } else if store.hasConflictCopy(note) {
+                            Text("Has conflict copy")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.orange)
+                        }
                     }
                 }
                 .allowsHitTesting(false)
