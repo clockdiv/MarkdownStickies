@@ -11,6 +11,11 @@ final class MarkdownSourceEditorView: NSView, NSTextViewDelegate, StickyNoteEdit
 
     private(set) var hasUnpublishedEdits = false
 
+    /// Files that can't be written open read-only: no typing, pasting or dropping.
+    var isReadOnly = false {
+        didSet { for tv in columnViews { tv.isEditable = !isReadOnly } }
+    }
+
     private var noteURL: URL
     private var background: NSColor
     private var fontSize: Double
@@ -343,7 +348,7 @@ final class MarkdownSourceEditorView: NSView, NSTextViewDelegate, StickyNoteEdit
     private func configureTextView(_ tv: SourceNSTextView) {
         tv.isRichText = true
         tv.allowsUndo = true
-        tv.isEditable = true
+        tv.isEditable = !isReadOnly
         tv.isSelectable = true
         tv.isAutomaticQuoteSubstitutionEnabled = false
         tv.isAutomaticDashSubstitutionEnabled = false
@@ -653,7 +658,7 @@ final class MarkdownSourceEditorView: NSView, NSTextViewDelegate, StickyNoteEdit
                     dest = String(dest.dropFirst().dropLast())
                 }
                 let snippet = ns.substring(with: match.range)
-                guard let fileURL = SyncImageAssets.resolveImageURL(dest, noteDirectory: noteDir),
+                guard let fileURL = ImageReferences.fileURL(forDestination: dest, noteDirectory: noteDir),
                       fileURL.isFileURL,
                       let image = NSImage(contentsOf: fileURL)
                 else { continue }
@@ -885,7 +890,7 @@ final class MarkdownSourceEditorView: NSView, NSTextViewDelegate, StickyNoteEdit
             if dest.hasPrefix("<"), dest.hasSuffix(">") { dest = String(dest.dropFirst().dropLast()) }
             let url: URL? = {
                 if dest.hasPrefix("http://") || dest.hasPrefix("https://") { return URL(string: dest) }
-                return SyncImageAssets.resolveImageURL(dest, noteDirectory: noteDirectory)
+                return ImageReferences.fileURL(forDestination: dest, noteDirectory: noteDirectory)
             }()
             if let url {
                 result.addAttributes(
@@ -1139,6 +1144,7 @@ final class MarkdownSourceEditorView: NSView, NSTextViewDelegate, StickyNoteEdit
 
     @discardableResult
     private func pasteImageFromClipboard() -> Bool {
+        if isReadOnly { return true }
         if let last = lastImagePasteAt, Date().timeIntervalSince(last) < 0.4 {
             return true // already handled this gesture
         }
@@ -1149,6 +1155,7 @@ final class MarkdownSourceEditorView: NSView, NSTextViewDelegate, StickyNoteEdit
     }
 
     private func insertDroppedImageFiles(_ urls: [URL]) {
+        guard !isReadOnly else { return }
         for url in urls {
             do {
                 let relative = try NoteImageStore.saveImageFile(from: url, nextToNote: noteURL)

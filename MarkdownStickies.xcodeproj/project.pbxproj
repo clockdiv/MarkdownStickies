@@ -19,7 +19,6 @@
 		A1000000000000000000000D /* StickyWindowManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000D /* StickyWindowManager.swift */; };
 		A1000000000000000000000F /* ControlWindowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000F /* ControlWindowView.swift */; };
 		A10000000000000000000022 /* SyncBannerOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000022 /* SyncBannerOverlay.swift */; };
-		A10000000000000000000029 /* SyncConflictSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000029 /* SyncConflictSheet.swift */; };
 		A10000000000000000000010 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000010 /* Assets.xcassets */; };
 		A10000000000000000000016 /* NoteImageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000016 /* NoteImageStore.swift */; };
 		A10000000000000000000017 /* MarkdownBlockParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000017 /* MarkdownBlockParser.swift */; };
@@ -56,7 +55,6 @@
 		B1000000000000000000000D /* StickyWindowManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StickyWindowManager.swift; sourceTree = "<group>"; };
 		B1000000000000000000000F /* ControlWindowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlWindowView.swift; sourceTree = "<group>"; };
 		B10000000000000000000022 /* SyncBannerOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncBannerOverlay.swift; sourceTree = "<group>"; };
-		B10000000000000000000029 /* SyncConflictSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncConflictSheet.swift; sourceTree = "<group>"; };
 		B10000000000000000000010 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B10000000000000000000011 /* MarkdownStickies.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = MarkdownStickies.entitlements; sourceTree = "<group>"; };
 		B10000000000000000000016 /* NoteImageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoteImageStore.swift; sourceTree = "<group>"; };
@@ -179,7 +177,6 @@
 			children = (
 				B1000000000000000000000F /* ControlWindowView.swift */,
 				B10000000000000000000022 /* SyncBannerOverlay.swift */,
-				B10000000000000000000029 /* SyncConflictSheet.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -319,7 +316,6 @@
 				A1000000000000000000000D /* StickyWindowManager.swift in Sources */,
 				A1000000000000000000000F /* ControlWindowView.swift in Sources */,
 				A10000000000000000000022 /* SyncBannerOverlay.swift in Sources */,
-				A10000000000000000000029 /* SyncConflictSheet.swift in Sources */,
 				A10000000000000000000016 /* NoteImageStore.swift in Sources */,
 				A10000000000000000000017 /* MarkdownBlockParser.swift in Sources */,
 				A10000000000000000000018 /* MarkdownHTMLRenderer.swift in Sources */,

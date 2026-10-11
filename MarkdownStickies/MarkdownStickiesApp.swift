@@ -35,7 +35,7 @@ struct MarkdownStickiesApp: App {
                 .keyboardShortcut("w", modifiers: [.command])
 
                 Button("Sync Now") {
-                    Task { await store.syncNow() }
+                    store.syncNow()
                 }
                 .keyboardShortcut("s", modifiers: [.command, .shift])
             }

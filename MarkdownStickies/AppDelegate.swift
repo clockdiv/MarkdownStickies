@@ -22,6 +22,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         false
     }
 
+    /// Waits for pending note saves before quitting.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let store = noteStore else { return .terminateNow }
+        Task { @MainActor in
+            await store.windowManager.saveAllOpenAndWait()
+            store.stateStore.saveNow()
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         if let keyMonitor {
             NSEvent.removeMonitor(keyMonitor)

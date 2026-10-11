@@ -279,28 +279,28 @@ private struct MacRun {
             switch step.action {
             case .writeNote(let id, let at, let expect, let source):
                 guard let data = iosContent(source) else { return "couldn't get the file from \(peerName)" }
-                try await writer.write(data, to: try noteURL(at), expect: expect, origin: .sync)
+                try writer.write(data, to: try noteURL(at), expect: expect, origin: .sync)
                 macLocations[id] = at
 
             case .writeConflictCopy(let id, let original, let at, _):
                 guard let data = fetched[.note(original)] else { return "couldn't get the file from \(peerName)" }
                 var copy = StickiesFrontmatter.setting(StickiesFrontmatter.idKey, to: id.uuidString, in: data)
                 copy = StickiesFrontmatter.setting(StickiesFrontmatter.conflictOfKey, to: original.uuidString, in: copy)
-                try await writer.write(copy, to: try noteURL(at), expect: .absent, origin: .sync)
+                try writer.write(copy, to: try noteURL(at), expect: .absent, origin: .sync)
                 macLocations[id] = at
                 try? store.snapshotConflictBase(copy: id, original: original)
 
             case .moveNote(let id, let from, let to, let hash):
-                try await writer.move(from: try noteURL(from), to: try noteURL(to), expectHash: hash, origin: .sync)
+                try writer.move(from: try noteURL(from), to: try noteURL(to), expectHash: hash, origin: .sync)
                 macLocations[id] = to
 
             case .trashNote(let id, let at, let hash):
-                try await writer.trash(try noteURL(at), expectHash: hash, origin: .sync)
+                try writer.trash(try noteURL(at), expectHash: hash, origin: .sync)
                 macLocations[id] = nil
 
             case .writeImage(let key, let expect, let source):
                 guard let data = iosContent(source) else { return "couldn't get the image from \(peerName)" }
-                try await writer.write(data, to: try imageURL(key), expect: expect, origin: .sync)
+                try writer.write(data, to: try imageURL(key), expect: expect, origin: .sync)
 
             case .trashImage:
                 return "images are never trashed on the Mac"
@@ -586,20 +586,20 @@ public enum IOSSyncResponder {
         do {
             switch action {
             case .writeNote(_, let at, let expect, _):
-                try await writer.write(content ?? Data(), to: try noteURL(at, vault: vault, info: info), expect: expect, origin: .sync)
+                try writer.write(content ?? Data(), to: try noteURL(at, vault: vault, info: info), expect: expect, origin: .sync)
             case .moveNote(_, let from, let to, let hash):
-                try await writer.move(
+                try writer.move(
                     from: try noteURL(from, vault: vault, info: info),
                     to: try noteURL(to, vault: vault, info: info),
                     expectHash: hash,
                     origin: .sync
                 )
             case .trashNote(_, let at, let hash):
-                try await writer.trash(try noteURL(at, vault: vault, info: info), expectHash: hash, origin: .sync)
+                try writer.trash(try noteURL(at, vault: vault, info: info), expectHash: hash, origin: .sync)
             case .writeImage(let key, let expect, _):
-                try await writer.write(content ?? Data(), to: try imageURL(key, vault: vault, info: info), expect: expect, origin: .sync)
+                try writer.write(content ?? Data(), to: try imageURL(key, vault: vault, info: info), expect: expect, origin: .sync)
             case .trashImage(let key, let hash):
-                try await writer.trash(try imageURL(key, vault: vault, info: info), expectHash: hash, origin: .sync)
+                try writer.trash(try imageURL(key, vault: vault, info: info), expectHash: hash, origin: .sync)
             case .writeConflictCopy:
                 return .skipped("conflict copies are only made on the Mac")
             }

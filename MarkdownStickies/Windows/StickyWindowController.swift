@@ -13,12 +13,20 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
     private weak var manager: StickyWindowManager?
 
     private(set) var draftText: String
-    private var isDirty = false
+    private var isDirty = false {
+        didSet { manager?.writer?.editors.setUnsavedEdits(isDirty, for: notePath) }
+    }
     private var saveTask: Task<Void, Never>?
-    /// Serializes note file writes off the main thread (avoids UI stalls on large notes).
-    private static let fileSaveQueue = DispatchQueue(label: "MarkdownStickies.noteSave")
-    /// Bumped on every saveNow so a stale background write can't clear newer dirty state.
+    /// Saves run one after another, so each one expects the hash the previous one wrote.
+    private var pendingSave: Task<Void, Never>?
+    /// Bumped on every saveNow; a queued save that isn't the newest skips (the newest writes).
     private var saveGeneration = 0
+    /// Hash of the file as this editor last loaded or saved it. A save expects exactly this.
+    private var loadedHash: String
+    /// Files that can't be written open read-only and never save.
+    let isReadOnly: Bool
+    /// Set once the window is closed for good (e.g. deleted): no more saves.
+    private var isDiscarded = false
     private var suppressExternalReload = false
     /// When false, the editor hides the YAML frontmatter block.
     private var showFrontmatter = false
@@ -55,9 +63,13 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
     init(
         note: Note,
         content initialText: String,
+        loadedHash: String,
+        isReadOnly: Bool,
         state: NoteWindowState,
         manager: StickyWindowManager
     ) {
+        self.loadedHash = loadedHash
+        self.isReadOnly = isReadOnly
         self.notePath = note.path
         self.manager = manager
         self.currentColor = state.color
@@ -110,6 +122,8 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
             columnCount: state.columnCount
         )
         body.translatesAutoresizingMaskIntoConstraints = false
+        body.isReadOnly = isReadOnly
+        if isReadOnly { titlebar.noteTitle = note.title + " (read-only)" }
 
         root.addSubview(titlebar)
         root.addSubview(body)
@@ -747,6 +761,18 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
     func closePreservingFile() {
         detachColorPanelIfNeeded()
         saveNow()
+        manager?.writer?.editors.setUnsavedEdits(false, for: notePath)
+        panel.delegate = nil
+        panel.close()
+    }
+
+    /// Closes without saving (the note is being deleted).
+    func closeDiscardingEdits() {
+        detachColorPanelIfNeeded()
+        isDiscarded = true
+        saveTask?.cancel()
+        pendingSave?.cancel()
+        isDirty = false
         panel.delegate = nil
         panel.close()
     }
@@ -812,39 +838,29 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
         panel.setFrame(frame, display: true, animate: animate)
     }
 
-    func applyExternalContent(_ text: String) {
-        // Refuse while the user is typing — including the debounce window before isDirty flips.
+    /// The file changed on disk. A clean editor reloads; one with unsaved edits keeps them, and
+    /// its next save notices the change and writes a conflict copy instead of overwriting.
+    func applyExternalContent(_ text: String, hash: String) {
         guard !isDirty, !content.hasUnpublishedEdits else { return }
         suppressExternalReload = true
         presentDocument(text)
         suppressExternalReload = false
-    }
-
-    /// Conflict merge / authority write: always replace the editor and kill in-flight saves
-    /// so a stale debounce cannot overwrite `conflict_resolved` on disk before sync.
-    func forceApplyExternalContent(_ text: String) {
-        saveTask?.cancel()
-        saveGeneration += 1
-        suppressExternalReload = true
-        presentDocument(text)
-        draftText = text
-        isDirty = false
-        suppressExternalReload = false
+        loadedHash = hash
     }
 
     /// Soft refresh so newly synced images appear without changing text.
-    func reloadPreviewMedia() {
+    func reloadInlineImages() {
         content.reloadPreviewMedia()
     }
 
     private func markTypingActivity() {
-        guard !suppressExternalReload else { return }
+        guard !suppressExternalReload, !isReadOnly else { return }
         isDirty = true
         scheduleSave()
     }
 
     private func handleTextChange(_ text: String) {
-        guard !suppressExternalReload else { return }
+        guard !suppressExternalReload, !isReadOnly else { return }
         draftText = showFrontmatter ? text : NoteFrontmatter.joinDocument(prefix: frontmatterPrefix, body: text)
         isDirty = true
         scheduleSave()
@@ -867,7 +883,9 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
     }
 
     func applyRenamedPath(_ newPath: URL, displayTitle: String) {
+        manager?.writer?.editors.setUnsavedEdits(false, for: notePath)
         notePath = newPath
+        manager?.writer?.editors.setUnsavedEdits(isDirty, for: newPath)
         noteTitle = displayTitle
         titlebar.noteTitle = displayTitle
         content.updateNoteURL(newPath)
@@ -882,6 +900,26 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
         content.applyBackground(ns)
         manager?.noteColorChanged(path: notePath, color: color)
         syncColorMenu()
+        writeColorToFrontmatter(color)
+    }
+
+    /// Color lives in the note's frontmatter (`stickies-color`) so it syncs. The default color
+    /// removes the key. Saved like any edit (debounced).
+    private func writeColorToFrontmatter(_ color: NoteColor) {
+        guard !isReadOnly else { return }
+        let full = fullDocumentMarkdown
+        let updated = String(decoding: StickiesFrontmatter.settingColor(color.frontmatter, in: Data(full.utf8)), as: UTF8.self)
+        guard updated != full else { return }
+        suppressExternalReload = true
+        if showFrontmatter {
+            content.markdown = updated
+        } else {
+            frontmatterPrefix = NoteFrontmatter.splitDocument(updated).prefix
+        }
+        draftText = updated
+        suppressExternalReload = false
+        isDirty = true
+        scheduleSave()
     }
 
     private func handleTextSizeChange(_ size: Double) {
@@ -917,62 +955,123 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
         }
     }
 
+    /// Saves through the shared writer, expecting the file to still be what this editor loaded.
+    /// Returns the queued save so callers can wait for it.
     @discardableResult
-    func saveNow() -> Bool {
+    func saveNow() -> Task<Void, Never>? {
         content.flushPendingPublish()
         saveTask?.cancel()
         let full = fullDocumentMarkdown
         draftText = full
-        guard isDirty else { return true }
+        guard isDirty, !isReadOnly, !isDiscarded else { return pendingSave }
         if showFrontmatter {
             frontmatterPrefix = NoteFrontmatter.splitDocument(full).prefix
         }
         saveGeneration += 1
         let generation = saveGeneration
+        let previous = pendingSave
+        let task = Task { @MainActor [weak self] in
+            await previous?.value
+            guard let self, generation == self.saveGeneration, !self.isDiscarded else { return }
+            await self.performSave()
+        }
+        pendingSave = task
+        return task
+    }
+
+    func saveAndWait() async {
+        await saveNow()?.value
+    }
+
+    private func performSave() async {
+        guard let writer = manager?.writer else { return }
+        let text = fullDocumentMarkdown
+        let data = Data(text.utf8)
+        let expected = loadedHash
         let path = notePath
-        let text = full
-        // Keep isDirty true until this write finishes — blocks disk reloads mid-flight.
+        guard NoteHashing.fileHash(data) != expected else {
+            finishSave(savedText: text, hash: expected)
+            return
+        }
         // Mark before the write so FSEvents during IO are ignored.
         manager?.noteDidSave(path: path, modifiedAt: Date())
-        Self.fileSaveQueue.async { [weak self] in
-            // Latest-wins: a merge/force reload bumps saveGeneration — never let a stale
-            // debounce write wipe conflict_resolved (that left merges on Mac only).
-            let stillCurrent = DispatchQueue.main.sync {
-                guard let self else { return false }
-                return generation == self.saveGeneration
-            }
-            guard stillCurrent else { return }
-            do {
-                try text.write(to: path, atomically: true, encoding: .utf8)
-                let values = try path.resourceValues(forKeys: [.contentModificationDateKey])
-                let modified = values.contentModificationDate ?? Date()
-                DispatchQueue.main.async {
-                    guard let self else { return }
-                    self.manager?.noteDidSave(path: path, modifiedAt: modified)
-                    guard generation == self.saveGeneration else { return }
-                    // More keystrokes landed while we wrote — schedule another save.
-                    if self.content.hasUnpublishedEdits || self.fullDocumentMarkdown != text {
-                        self.isDirty = true
-                        self.scheduleSave()
-                        return
-                    }
-                    self.isDirty = false
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    guard let self else { return }
-                    if generation == self.saveGeneration {
-                        self.isDirty = true
-                    }
-                }
-            }
+        let result = await Task.detached { () -> Result<String, Error> in
+            Result { try writer.write(data, to: path, expect: .hash(expected), origin: .app) }
+        }.value
+
+        switch result {
+        case .success(let hash):
+            manager?.noteDidSave(path: path, modifiedAt: Date())
+            finishSave(savedText: text, hash: hash)
+        case .failure(NoteWriter.Failure.changedOnDisk), .failure(NoteWriter.Failure.missing):
+            saveAsConflictCopy(data, originalPath: path)
+        case .failure:
+            isDirty = true   // try again on the next save
         }
-        return true
+    }
+
+    private func finishSave(savedText: String, hash: String) {
+        loadedHash = hash
+        // More keystrokes landed while we wrote — save again.
+        if content.hasUnpublishedEdits || fullDocumentMarkdown != savedText {
+            isDirty = true
+            scheduleSave()
+        } else {
+            isDirty = false
+        }
+    }
+
+    /// The file changed underneath this editor (another app, or it was moved or trashed).
+    /// Never overwrite: keep the buffer as a conflict copy next to the note, then show the file
+    /// as it is now (or keep editing the copy if the original is gone).
+    private func saveAsConflictCopy(_ data: Data, originalPath: URL) {
+        guard let writer = manager?.writer else { return }
+        let originalID = StickiesFrontmatter.id(in: data)
+        var copy = StickiesFrontmatter.setting(StickiesFrontmatter.idKey, to: UUID().uuidString, in: data)
+        if let originalID {
+            copy = StickiesFrontmatter.setting(StickiesFrontmatter.conflictOfKey, to: originalID.uuidString, in: copy)
+        }
+        let name = ConflictCopy.filename(
+            forOriginal: originalPath.lastPathComponent,
+            deviceName: manager?.deviceName ?? "Mac",
+            date: Date()
+        )
+        let directory = originalPath.deletingLastPathComponent()
+        var copyURL = directory.appendingPathComponent(name)
+        var index = 2
+        while NoteWriter.existsIgnoringCase(copyURL) {
+            let stem = (name as NSString).deletingPathExtension
+            copyURL = directory.appendingPathComponent("\(stem) \(index).md")
+            index += 1
+        }
+        do {
+            let hash = try writer.write(copy, to: copyURL, expect: .absent, origin: .app)
+            manager?.noteDidSave(path: copyURL, modifiedAt: Date())
+            if let current = try? Data(contentsOf: originalPath) {
+                isDirty = false
+                applyExternalContent(String(decoding: current, as: UTF8.self), hash: NoteHashing.fileHash(current))
+            } else {
+                // The original is gone: keep editing the copy.
+                notePath = copyURL
+                content.updateNoteURL(copyURL)
+                suppressExternalReload = true
+                presentDocument(String(decoding: copy, as: UTF8.self))
+                suppressExternalReload = false
+                loadedHash = hash
+                isDirty = false
+            }
+            let alert = NSAlert()
+            alert.messageText = "Your Edits Were Saved as a Copy"
+            alert.informativeText = "“\(noteTitle)” changed on disk while you were editing, so your version was saved as “\(copyURL.lastPathComponent)”."
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        } catch {
+            isDirty = true
+        }
     }
 
     func windowWillClose(_ notification: Notification) {
         detachColorPanelIfNeeded()
-        isDirty = true
         saveNow()
         manager?.stickyWillClose(path: notePath, frame: frameForPersistence)
     }

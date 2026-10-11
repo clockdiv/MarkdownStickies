@@ -70,12 +70,15 @@ public enum NoteFrontmatter {
         }
     }
 
+    /// Splits off the frontmatter block, using the strict rule of `StickiesFrontmatter`
+    /// (line 1 is `---`, a closing `---`, the first line inside is `key: value`).
     public static func splitDocument(_ markdown: String) -> DocumentParts {
-        guard let block = leadingFrontmatter(in: markdown) else {
+        let bytes = Array(markdown.utf8)
+        guard let block = StickiesFrontmatter.block(in: bytes) else {
             return DocumentParts(prefix: "", body: markdown)
         }
-        let prefix = String(markdown[..<block.bodyStartIndex])
-        let body = String(markdown[block.bodyStartIndex...])
+        let prefix = String(decoding: bytes[..<block.bodyStart], as: UTF8.self)
+        let body = String(decoding: bytes[block.bodyStart...], as: UTF8.self)
         return DocumentParts(prefix: prefix, body: body)
     }
 
@@ -290,32 +293,28 @@ public enum NoteFrontmatter {
         return normalizeFolder("\(rootName)/\(nested)")
     }
 
-    /// New note body with frontmatter and an H1.
-    /// `title` / `folder` are optional — prefer filename + on-disk path for those;
-    /// only `id` (+ optional `created_on`) are required for sync.
+    /// New note: frontmatter with `stickies-id` (and `created_on`), then an H1.
     public static func initialDocument(
         title: String,
         id: UUID = UUID(),
-        folder: String? = nil,
         createdOn: String? = nil
     ) -> String {
         let heading = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let effective = heading.isEmpty ? "Untitled" : heading
-        var fields = ["\(idKey): \(id.uuidString)"]
+        var fields = ["\(StickiesFrontmatter.idKey): \(id.uuidString)"]
         if let created = createdOn?.trimmingCharacters(in: .whitespacesAndNewlines), !created.isEmpty {
             fields.append("\(createdOnKey): \(created)")
         }
-        // Intentionally omit folder/title from default frontmatter (sync thrash).
-        _ = folder
-        let block = fields.joined(separator: "\n")
-        return """
-        ---
-        \(block)
-        ---
+        return "---\n" + fields.joined(separator: "\n") + "\n---\n\n# \(effective)\n"
+    }
 
-        # \(effective)
-
-        """
+    /// A file inside the legacy trash folder: a folder named `Trash` directly under one of `roots`.
+    public static func isLegacyTrash(file: URL, roots: [URL]) -> Bool {
+        let path = file.standardizedFileURL.path
+        return roots.contains { root in
+            let trash = root.standardizedFileURL.appendingPathComponent(trashFolderName).path
+            return path.hasPrefix(trash + "/")
+        }
     }
 
     // MARK: - Private

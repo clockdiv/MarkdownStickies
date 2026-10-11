@@ -30,22 +30,13 @@ struct ControlWindowView: View {
         .frame(minWidth: 340, idealWidth: 380, minHeight: 460, idealHeight: 520)
         .background(Self.canvas)
         .overlay {
-            if let banner = store.syncBanner {
-                SyncBannerOverlay(feedback: banner) {
-                    store.dismissSyncBanner()
-                }
+            if store.sync.state != .idle {
+                SyncBannerOverlay(
+                    state: store.sync.state,
+                    onCancel: { store.cancelSync() },
+                    onDismiss: { store.dismissSyncResult() }
+                )
             }
-        }
-        .sheet(isPresented: Binding(
-            get: { store.syncBanner == nil && !store.pendingConflicts.isEmpty },
-            set: { presented in
-                if !presented {
-                    store.dismissPendingConflicts()
-                }
-            }
-        )) {
-            SyncConflictSheet()
-                .environmentObject(store)
         }
         .onDisappear { NoteHoverPreviewPanel.hide() }
     }
@@ -60,20 +51,20 @@ struct ControlWindowView: View {
 
             if selectedTab == .notes {
                 Button {
-                    Task { await store.syncNow() }
+                    store.syncNow()
                 } label: {
                     Image(systemName: "arrow.triangle.2.circlepath")
                         .font(.system(size: 15, weight: .regular))
                         .foregroundStyle(Self.iconColor)
                         .frame(width: 24, height: 24)
                         .contentShape(Rectangle())
-                        .opacity(store.syncService.isSyncing ? 0.45 : 1)
+                        .opacity(store.sync.state.isBusy ? 0.45 : 1)
                 }
                 .buttonStyle(.plain)
-                .disabled(store.syncService.isSyncing || store.scanConfig.syncedURLs().isEmpty)
+                .disabled(store.sync.state.isBusy || store.scanConfig.syncedURLs().isEmpty)
                 .help(store.scanConfig.syncedURLs().isEmpty
-                      ? "Enable Sync on a folder in Settings"
-                      : (store.syncService.lastStatus ?? "Sync with iOS on this network"))
+                      ? "Turn on Sync for a folder in Settings"
+                      : "Sync with your iPhone or iPad on this network")
                 .onHover { setHandCursor($0) }
 
                 Button {
@@ -211,8 +202,6 @@ struct ControlWindowView: View {
                         isActive: activePath == note.path.path,
                         noteColor: noteColor,
                         previewColor: state?.color ?? .default,
-                        wasReceived: store.syncInboundPaths.contains(note.path.standardizedFileURL.path),
-                        wasSent: store.syncOutboundPaths.contains(note.path.standardizedFileURL.path),
                         onOpen: { store.openNote(note) }
                     )
                     .contextMenu {
@@ -549,7 +538,7 @@ private struct SettingsRuleRow: View {
                 .toggleStyle(.switch)
                 .controlSize(.small)
                 .labelsHidden()
-                .help(isSynced ? "Syncing with iPhone — click to turn off" : "Sync with iPhone on this network")
+                .help(isSynced ? "Synced with your iPhone or iPad — click to turn off" : "Sync this folder with your iPhone or iPad")
                 .modifier(PointingHandCursor())
             }
 
@@ -759,8 +748,6 @@ private struct NoteListRow: View {
     let noteColor: NoteColor?
     /// Sticky fill used for the floating hover peek (defaults when never opened).
     let previewColor: NoteColor
-    let wasReceived: Bool
-    let wasSent: Bool
     let onOpen: () -> Void
 
     @State private var isRowHovered = false
@@ -797,14 +784,6 @@ private struct NoteListRow: View {
                             .lineLimit(1)
                             .frame(maxWidth: .infinity, alignment: .leading)
 
-                        if wasReceived {
-                            SyncDirectionBadge(direction: .received)
-                                .help("Received from peer on last sync")
-                        }
-                        if wasSent {
-                            SyncDirectionBadge(direction: .sent)
-                                .help("Sent to peer on last sync")
-                        }
                     }
                 }
                 .allowsHitTesting(false)
@@ -1158,40 +1137,5 @@ private enum PathFolderNSMenu {
 private enum ControlTab {
     case notes
     case settings
-}
-
-/// Compact sync direction chip: green ↓ received, blue → sent.
-private struct SyncDirectionBadge: View {
-    enum Direction {
-        case received
-        case sent
-    }
-
-    let direction: Direction
-
-    private var fill: Color {
-        switch direction {
-        case .received: return .green
-        case .sent: return .blue
-        }
-    }
-
-    private var arrow: String {
-        switch direction {
-        case .received: return "arrow.down"
-        case .sent: return "arrow.right"
-        }
-    }
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .fill(fill)
-            Image(systemName: arrow)
-                .font(.system(size: 8, weight: .bold))
-                .foregroundStyle(.white)
-        }
-        .frame(width: 14, height: 14)
-    }
 }
 

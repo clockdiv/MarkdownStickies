@@ -23,6 +23,7 @@ final class ScanConfigStore: ObservableObject {
     @Published var lastError: String?
 
     private let syncedPathsKey = "syncedScanRootPaths"
+    private let rootIDsKey = "syncRootIDs"
     private let legacyPathsKey = "scanRootPaths"
     private let didMigrateBookmarksKey = "didMigrateScanRootsToScanConf"
 
@@ -46,6 +47,29 @@ final class ScanConfigStore: ObservableObject {
     func syncedURLs() -> [URL] {
         let urls = roots.filter(\.isSynced).compactMap(\.path?.standardizedFileURL)
         return Self.dedupeNested(urls)
+    }
+
+    /// Every INCLUDE folder as a sync root, with a stable id (not deduped: the sync uses the
+    /// deepest root that contains a note).
+    func syncRoots() -> [SyncRoot] {
+        var seen = Set<String>()
+        return roots.compactMap { root -> SyncRoot? in
+            guard root.isIncludeDirectory, let path = root.path?.standardizedFileURL,
+                  seen.insert(path.path).inserted
+            else { return nil }
+            return SyncRoot(id: rootID(for: path), url: path, isSynced: root.isSynced)
+        }
+    }
+
+    /// Stable id for a root folder, kept in UserDefaults by path.
+    func rootID(for url: URL) -> UUID {
+        let path = url.standardizedFileURL.path
+        var ids = UserDefaults.standard.dictionary(forKey: rootIDsKey) as? [String: String] ?? [:]
+        if let raw = ids[path], let id = UUID(uuidString: raw) { return id }
+        let id = UUID()
+        ids[path] = id.uuidString
+        UserDefaults.standard.set(ids, forKey: rootIDsKey)
+        return id
     }
 
     func setSynced(_ root: ScanRoot, enabled: Bool) {

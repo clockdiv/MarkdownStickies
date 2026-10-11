@@ -1,4 +1,5 @@
 import AppKit
+import MarkdownStickiesCore
 import SwiftUI
 
 /// Preset sticky colors (stored by name in note-state.json).
@@ -166,5 +167,26 @@ extension NSColor {
         let newS = min(1, max(s, 0.55) * 1.15)
         let newB = min(0.72, max(0.35, b * 0.65))
         return NSColor(calibratedHue: h, saturation: newS, brightness: newB, alpha: 1)
+    }
+}
+
+extension NoteColor {
+    /// The frontmatter form (`stickies-color`).
+    var frontmatter: MarkdownStickiesCore.NoteColor {
+        switch self {
+        case .preset(let preset):
+            return .preset(MarkdownStickiesCore.NoteColor.Preset(rawValue: preset.rawValue) ?? .yellow)
+        case .custom(let hex):
+            return MarkdownStickiesCore.NoteColor(frontmatterValue: hex) ?? .default
+        }
+    }
+
+    init(frontmatter: MarkdownStickiesCore.NoteColor) {
+        switch frontmatter {
+        case .preset(let preset):
+            self = .preset(StickyColor(rawValue: preset.rawValue) ?? .yellow)
+        case .custom(let hex):
+            self = .custom(hex)
+        }
     }
 }

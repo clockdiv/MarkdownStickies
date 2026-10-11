@@ -10,19 +10,16 @@ final class NoteStore: ObservableObject {
     @Published var filterText: String = ""
     @Published var lastError: String?
     @Published var isScanning = false
-    /// Paths written from the peer on the last sync.
-    @Published private(set) var syncInboundPaths: Set<String> = []
-    /// Paths we sent that the peer has not confirmed yet.
-    @Published private(set) var syncOutboundPaths: Set<String> = []
-    /// Centered sync result banner (stays until dismissed or next sync).
-    @Published var syncBanner: SyncFeedback?
-    /// Keep-both conflicts from the last sync — Mac shows a review sheet after the banner.
-    @Published var pendingConflicts: [SyncConflict] = []
 
     let scanConfig: ScanConfigStore
     let stateStore: NoteStateStore
     let windowManager: StickyWindowManager
-    let syncService: LanSyncService
+    /// Every note write on this Mac goes through this writer (editor saves, app actions, sync).
+    let writer: NoteWriter
+    /// `stickies-id` and color per file, cached by modification date.
+    let idIndex = NoteIDIndex()
+    let sync: SyncService
+    let deviceName: String
 
     private let watcher = FolderWatcher()
     private var rescanTask: Task<Void, Never>?
@@ -31,6 +28,12 @@ final class NoteStore: ObservableObject {
     /// Paths we just wrote — ignore matching FSEvents so typing doesn't full-rescan.
     private var recentLocalWrites: [String: Date] = [:]
     private let localWriteIgnoreInterval: TimeInterval = 1.5
+
+    /// `~/Library/Application Support/MarkdownStickies` — sync state and backups, never in project folders.
+    static var supportDirectory: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("MarkdownStickies", isDirectory: true)
+    }
 
     /// Filtered notes when searching; otherwise the full note list (sets only affect open stickies).
     var filteredNotes: [Note] {
@@ -59,20 +62,38 @@ final class NoteStore: ObservableObject {
             .map(\.0)
     }
 
+
     init() {
         let scanConfig = ScanConfigStore()
         let stateStore = NoteStateStore()
         let windowManager = StickyWindowManager(stateStore: stateStore)
-        let deviceName = Host.current().localizedName?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let syncService = LanSyncService(
-            deviceName: (deviceName?.isEmpty == false ? deviceName! : "Mac")
+        let name = Host.current().localizedName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let deviceName = (name?.isEmpty == false ? name! : "Mac")
+        let writer = NoteWriter(
+            trash: SystemTrash(),
+            backup: BackupFolder(directory: Self.supportDirectory.appendingPathComponent("Backups", isDirectory: true)),
+            editors: EditorRegistry()
         )
         self.scanConfig = scanConfig
         self.stateStore = stateStore
         self.windowManager = windowManager
-        self.syncService = syncService
+        self.writer = writer
+        self.deviceName = deviceName
+
+        weak var weakSelf: NoteStore?
+        self.sync = SyncService(deviceName: deviceName, platform: .mac) { connection, progress in
+            guard let store = await MainActor.run(body: { weakSelf }) else { return .failed("The app is closing.") }
+            return await store.runSyncSession(connection, progress: progress)
+        }
+        weakSelf = self
+
+        let index = idIndex
+        stateStore.resolveID = { index.entry(for: $0).id }
         windowManager.attach(noteStore: self)
-        configureSync()
+        sync.onFinished = { [weak self] _ in
+            self?.rescan(restoreWindows: false)
+            self?.windowManager.reloadInlineImages()
+        }
 
         scanConfig.objectWillChange
             .receive(on: RunLoop.main)
@@ -96,7 +117,7 @@ final class NoteStore: ObservableObject {
             }
             .store(in: &cancellables)
 
-        syncService.objectWillChange
+        sync.objectWillChange
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 self?.objectWillChange.send()
@@ -108,287 +129,121 @@ final class NoteStore: ObservableObject {
         rescan(restoreWindows: true)
         restartWatcher()
         refreshSyncAdvertising()
+        BackupFolder(directory: Self.supportDirectory.appendingPathComponent("Backups", isDirectory: true)).purge()
     }
 
-    private func configureSync() {
-        syncService.catalogProvider = { [weak self] in
-            guard let self else { return [] }
-            self.scanConfig.reload()
-            return SyncCatalogBuilder.catalog(
-                roots: self.scanConfig.syncedURLs(),
-                config: self.scanConfig.config
-            )
-        }
-        syncService.syncRootsProvider = { [weak self] in
-            self?.scanConfig.syncedURLs() ?? []
-        }
-        syncService.onApplyRemoteCatalog = { [weak self] remote, peerLabel in
-            self?.applyRemoteCatalog(remote, peerLabel: peerLabel) ?? .empty
-        }
-        syncService.onExchangeFinished = { [weak self] result, role in
-            self?.presentSyncResult(result, role: role)
-        }
-        syncService.onProgress = { [weak self] feedback in
-            self?.syncBanner = feedback
-        }
-        syncService.onRemoteBannerDismiss = { [weak self] in
-            self?.syncBanner = nil
-        }
-        syncService.onRemoteMergeCancel = { [weak self] in
-            self?.syncBanner = nil
-            self?.pendingConflicts = []
-        }
-    }
+    // MARK: - Sync
 
     private func refreshSyncAdvertising() {
         if scanConfig.syncedURLs().isEmpty {
-            syncService.stopAdvertising()
+            sync.stopAdvertising()
         } else {
-            syncService.startAdvertising()
-            syncService.requestLocalNetworkAuthorization()
+            sync.startAdvertising()
         }
     }
 
+    /// Turning Sync off removes the folder's notes from the iOS device at the next sync
+    /// (they stay on this Mac), so it asks first.
     func setFolderSynced(_ root: ScanRoot, enabled: Bool) {
+        if !enabled {
+            let alert = NSAlert()
+            alert.messageText = "Turn Off Sync for “\(root.path?.lastPathComponent ?? root.pattern)”?"
+            alert.informativeText = "The next sync removes this folder’s notes from your iPhone or iPad. They stay on this Mac. Notes edited on the device but not synced yet are kept there and listed in the sync summary."
+            alert.addButton(withTitle: "Turn Sync Off")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
         scanConfig.setSynced(root, enabled: enabled)
         refreshSyncAdvertising()
     }
 
-    func syncNow() async {
-        let roots = scanConfig.syncedURLs()
-        guard !roots.isEmpty else {
-            lastError = "Enable Sync on a scan folder in Settings first."
+    func syncNow() {
+        guard !scanConfig.syncedURLs().isEmpty else {
+            lastError = "Turn on Sync for a folder in Settings first."
             return
         }
-        windowManager.saveAllOpen()
         lastError = nil
-        pendingConflicts = []
-        // Show the green card immediately — LanSyncService keeps it updated.
-        syncBanner = SyncFeedback.progress(
-            title: "Syncing",
-            message: "Looking for peer…",
-            startedAt: Date(),
-            timeoutSeconds: 20,
-            debugCode: "sync:looking"
+        sync.syncNow(choose: { peers in Self.choosePeer(peers) })
+    }
+
+    func cancelSync() {
+        sync.cancel()
+    }
+
+    func dismissSyncResult() {
+        sync.dismissResult()
+    }
+
+    /// Runs the Mac side of one session with the current folders and settings.
+    private func runSyncSession(
+        _ connection: SyncConnection,
+        progress: @escaping @Sendable (SyncProgress) -> Void
+    ) async -> SyncOutcome {
+        scanConfig.reload()
+        let defaultRoot = preferredCreateDirectory().map { scanConfig.rootID(for: $0) }
+        let configuration = MacSyncSession.Configuration(
+            deviceID: sync.deviceID,
+            deviceName: deviceName,
+            stateRoot: Self.supportDirectory,
+            roots: scanConfig.syncRoots(),
+            config: scanConfig.config,
+            defaultRootID: defaultRoot
         )
-        do {
-            // Final banner + debug log come from onExchangeFinished / onProgress.
-            _ = try await syncService.syncWithPeer()
-        } catch {
-            let message = LanSyncService.friendlyNetworkError(error)
-            let feedback = SyncFeedback(
-                kind: .failure,
-                title: "Sync failed",
-                message: message,
-                statusLine: "Sync failed — \(message)",
-                detail: String(describing: error),
-                debugCode: "sync:transport-error",
-                receivedCount: 0,
-                sentConfirmedCount: 0,
-                sentExpectedCount: 0
-            )
-            syncBanner = feedback
-            syncService.setStatus(feedback.statusLine)
-            if let dir = preferredCreateDirectory() ?? scanConfig.syncedURLs().first {
-                SyncDebugLog.appendExchange(
-                    directory: dir,
-                    deviceName: syncService.deviceName,
-                    role: .client,
-                    feedback: feedback,
-                    result: nil
-                )
-            }
-        }
+        let hooks = MacSyncSession.Hooks(
+            saveOpenEditors: { [weak self] in await self?.windowManager.saveAllOpenAndWait() },
+            confirmBulkTrash: { [weak self] plan in await self?.confirmBulkTrash(plan) ?? false },
+            progress: progress
+        )
+        return await MacSyncSession.run(connection: connection, configuration: configuration, writer: writer, hooks: hooks)
     }
 
-    func dismissSyncBanner() {
-        if syncBanner?.debugCode == "sync:await-mac-merge" {
-            abortMergeSession(notifyPeer: true)
-            return
+    /// Bulk-delete guard (spec §3.8): more than 10 notes would move to the trash.
+    private func confirmBulkTrash(_ plan: SyncPlan) -> Bool {
+        sync.setWaitingForConfirmation(true)
+        defer { sync.setWaitingForConfirmation(false) }
+        let peer = sync.lastPeerName ?? sync.genericPeerName
+        var lines: [String] = []
+        var macCount = 0
+        var peerCount = 0
+        for step in plan.steps {
+            guard case .trashNote(_, let at, _) = step.action else { continue }
+            if step.device == .mac { macCount += 1 } else { peerCount += 1 }
+            if lines.count < 15 { lines.append("• \(at.filename) (\(step.device == .mac ? "this Mac" : peer))") }
         }
-        let shouldNotifyPeer = syncBanner?.kind == .success
-        syncBanner = nil
-        // Only clear the peer's success card. Never resurrect progress via Bonjour side effects.
-        if shouldNotifyPeer {
-            syncService.notifyPeerDismissBanner()
-        }
+        let total = macCount + peerCount
+        if total > lines.count { lines.append("… and \(total - lines.count) more") }
+
+        let alert = NSAlert()
+        alert.messageText = "Move \(total) Notes to the Trash?"
+        var where_: [String] = []
+        if macCount > 0 { where_.append("\(macCount) on this Mac") }
+        if peerCount > 0 { where_.append("\(peerCount) on \(peer)") }
+        alert.informativeText = "This sync would move " + where_.joined(separator: " and ")
+            + " to the Trash, because they were deleted on the other device.\n\n" + lines.joined(separator: "\n")
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Continue")
+        alert.addButton(withTitle: "Cancel Sync")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
-    /// Later / Sync Later — close merge UI on both devices; note bodies stay as they are.
-    func dismissPendingConflicts() {
-        abortMergeSession(notifyPeer: true)
+    private static func choosePeer(_ peers: [SyncPeer]) -> SyncPeer? {
+        let alert = NSAlert()
+        alert.messageText = "Sync with Which Device?"
+        alert.informativeText = "More than one device with Markdown Stickies is on this network."
+        for peer in peers.prefix(3) { alert.addButton(withTitle: peer.name) }
+        alert.addButton(withTitle: "Cancel")
+        let index = alert.runModal().rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+        return index >= 0 && index < min(peers.count, 3) ? peers[index] : nil
     }
 
-    private func abortMergeSession(notifyPeer: Bool) {
-        pendingConflicts = []
-        syncBanner = nil
-        if notifyPeer {
-            syncService.notifyPeerCancelMerge()
-        }
-    }
-
-    /// Open both sides of a keep-both conflict (local + sibling).
-    func openConflictNotes(_ conflict: SyncConflict) {
-        let roots = scanConfig.syncedURLs()
-        let paths = SyncCatalogBuilder.pathIndex(roots: roots)
-        if let localPath = paths[conflict.id] {
-            let note = notes.first(where: { $0.path.standardizedFileURL == localPath.standardizedFileURL })
-                ?? Note(
-                    path: localPath,
-                    date: conflict.local.modifiedAt,
-                    title: conflict.local.title,
-                    modifiedAt: conflict.local.modifiedAt
-                )
-            openNote(note)
-        }
-        if let sibling = conflict.remoteCopyPath {
-            let note = notes.first(where: { $0.path.standardizedFileURL == sibling.standardizedFileURL })
-                ?? Note(
-                    path: sibling,
-                    date: conflict.remote.modifiedAt,
-                    title: "\(conflict.remote.title) (from \(conflict.peerLabel))",
-                    modifiedAt: conflict.remote.modifiedAt
-                )
-            openNote(note)
-        }
-    }
-
-    /// Dismiss one conflict after the user confirms keep-both.
-    func acknowledgeConflict(_ conflict: SyncConflict) {
-        pendingConflicts.removeAll { $0.id == conflict.id }
-    }
-
-    /// Write a merged body into the local (primary) note and trash the sibling copy.
-    /// Stamps `conflict_resolved` so the next sync applies this body on peers (no re-conflict).
-    /// Does **not** create a new note — only updates the original file.
-    func mergeConflict(_ conflict: SyncConflict, mergedBody: String) {
-        let roots = scanConfig.effectiveScanURLs()
-        let synced = scanConfig.syncedURLs()
-        let indexRoots = synced.isEmpty ? roots : synced
-        let trashRoots = synced.isEmpty ? roots : synced
-        let paths = SyncCatalogBuilder.pathIndex(roots: indexRoots)
-        guard let localPath = paths[conflict.id] else {
-            lastError = "Could not find the local conflict note."
-            return
-        }
-        do {
-            let now = Date()
-            let cleaned = Self.normalizedMergeBody(mergedBody, fallingBackTo: conflict.local.body)
-            // Preserve frontmatter from the chosen markdown when present; always force primary id + resolve.
-            let withFrontmatter: String = {
-                let parts = NoteFrontmatter.splitDocument(cleaned)
-                if parts.prefix.isEmpty {
-                    // Editor showed body-only — graft onto existing primary frontmatter.
-                    let existing = (try? String(contentsOf: localPath, encoding: .utf8)) ?? conflict.local.body
-                    let existingParts = NoteFrontmatter.splitDocument(existing)
-                    return NoteFrontmatter.joinDocument(prefix: existingParts.prefix, body: cleaned)
-                }
-                return cleaned
-            }()
-            var body = NoteFrontmatter.settingSyncID(conflict.id, in: withFrontmatter)
-            body = NoteFrontmatter.settingConflictResolved(now, in: body)
-            try body.write(to: localPath, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes(
-                [.modificationDate: now],
-                ofItemAtPath: localPath.path
-            )
-            noteFileDidSave(path: localPath, modifiedAt: now)
-            let note = notes.first(where: { $0.path.standardizedFileURL == localPath.standardizedFileURL })
-                ?? Note(
-                    path: localPath,
-                    date: now,
-                    title: conflict.local.title,
-                    modifiedAt: now
-                )
-            // Force into the open sticky — a normal reload is refused while dirty, and an
-            // in-flight debounce save used to overwrite this stamp before sync left the Mac.
-            windowManager.forceReloadIfOpen(note: note, content: body)
-
-            // Remove the keep-both sibling for good (local-only aide — not Trash/sync).
-            let siblingPath = conflict.remoteCopyPath
-                ?? paths[conflict.remoteCopyID]
-            if let sibling = siblingPath,
-               sibling.standardizedFileURL != localPath.standardizedFileURL,
-               FileManager.default.fileExists(atPath: sibling.path) {
-                windowManager.close(path: sibling)
-                try? FileManager.default.removeItem(at: sibling)
-            }
-
-            try removeConflictSiblingCopies(
-                matchingFingerprint: NoteFrontmatter.contentFingerprint(conflict.remote.body),
-                exceptID: conflict.id,
-                exceptPath: localPath,
-                roots: trashRoots
-            )
-
-            pendingConflicts.removeAll { $0.id == conflict.id }
-            rescan(restoreWindows: false)
-            // Push the merge to iOS (Mac is authority) — don't leave the phone on the old body.
-            let stampedBody = body
-            let stampedPath = localPath
-            Task {
-                // syncNow saveAllOpen()'s open stickies first. Re-assert stamp on disk so a
-                // race can't send an unstamped catalog (iOS then keeps its old body forever).
-                self.windowManager.saveAllOpen()
-                let onDisk = (try? String(contentsOf: stampedPath, encoding: .utf8)) ?? ""
-                if NoteFrontmatter.conflictResolvedAt(in: onDisk) == nil {
-                    try? stampedBody.write(to: stampedPath, atomically: true, encoding: .utf8)
-                    self.windowManager.forceReloadIfOpen(note: note, content: stampedBody)
-                }
-                await self.syncNow()
-            }
-        } catch {
-            lastError = "Could not merge conflict: \(error.localizedDescription)"
-        }
-    }
-
-    /// Drop leftover git-style markers if the user pasted an old merge draft.
-    private static func normalizedMergeBody(_ raw: String, fallingBackTo fallback: String) -> String {
-        var lines = raw.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        lines.removeAll { line in
-            line.hasPrefix("<<<<<<<") || line.hasPrefix(">>>>>>>") || line == "======="
-        }
-        let cleaned = lines.joined(separator: "\n")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return cleaned.isEmpty ? fallback : cleaned + "\n"
-    }
-
-    /// Delete leftover keep-both copies of the superseded peer body (not Trash — local only).
-    private func removeConflictSiblingCopies(
-        matchingFingerprint fingerprint: String,
-        exceptID: UUID,
-        exceptPath: URL,
-        roots: [URL]
-    ) throws {
-        let except = exceptPath.standardizedFileURL
-        for note in NoteScanner.scan(roots: roots) {
-            let path = note.path.standardizedFileURL
-            guard path != except else { continue }
-            guard let text = try? String(contentsOf: path, encoding: .utf8) else { continue }
-            if let id = NoteFrontmatter.syncID(in: text), id == exceptID { continue }
-            guard NoteFrontmatter.contentFingerprint(text) == fingerprint else { continue }
-            if NoteFrontmatter.isTrashed(file: path) { continue }
-            windowManager.close(path: path)
-            try? FileManager.default.removeItem(at: path)
-        }
-    }
-
-    /// User opened/focused a note — drop the “received” badge (they’ve seen it).
-    func acknowledgeInbound(for path: URL) {
-        let key = path.standardizedFileURL.path
-        guard syncInboundPaths.contains(key) else { return }
-        syncInboundPaths.remove(key)
-    }
+    // MARK: - Notes
 
     func openNote(_ note: Note) {
-        acknowledgeInbound(for: note.path)
         windowManager.open(note: note)
     }
 
     /// True when this note is in recents or has an inbound badge (and isn’t already buried).
     func canRemoveFromRecents(_ note: Note) -> Bool {
-        let key = note.path.standardizedFileURL.path
-        if syncInboundPaths.contains(key) { return true }
         guard let state = stateStore.storedState(for: note.path) else { return false }
         return state.removedFromRecentsAt == nil && state.lastOpenedAt != nil
     }
@@ -401,7 +256,6 @@ final class NoteStore: ObservableObject {
             windowManager.close(path: path)
         }
         stateStore.markRemovedFromRecents(path)
-        acknowledgeInbound(for: path)
         sortNotes()
     }
 
@@ -415,100 +269,9 @@ final class NoteStore: ObservableObject {
 
     /// Called when a sticky is opened (or re-focused) — bumps list order.
     func noteDidOpen(path: URL) {
-        acknowledgeInbound(for: path)
         sortNotes()
     }
 
-    private func presentSyncResult(_ result: SyncExchangeResult, role: SyncExchangeRole) {
-        let roots = scanConfig.syncedURLs()
-        let localPaths = SyncCatalogBuilder.pathIndex(roots: roots)
-        syncOutboundPaths = Set(
-            result.peerAppliedIDs.compactMap { localPaths[$0]?.standardizedFileURL.path }
-        )
-
-        pendingConflicts = result.conflicts
-
-        let feedback = SyncFeedback.from(
-            result: result,
-            role: role,
-            peerName: result.peerDeviceName
-        )
-        syncService.setStatus(feedback.statusLine)
-        // Banner carries sync errors; avoid a second alert.
-        if feedback.kind == .success
-            || feedback.debugCode == "sync:conflicts"
-            || feedback.debugCode == "sync:await-mac-merge"
-        {
-            lastError = nil
-        }
-
-        // Conflicts → skip the orange “kept both” card and open the merge sheet directly.
-        if !result.conflicts.isEmpty {
-            syncBanner = nil
-        } else {
-            syncBanner = feedback
-        }
-
-        if let dir = preferredCreateDirectory() ?? roots.first {
-            SyncDebugLog.appendExchange(
-                directory: dir,
-                deviceName: syncService.deviceName,
-                role: role,
-                feedback: feedback,
-                result: result
-            )
-            // Debug note is new/updated — refresh list so it appears.
-            rescan(restoreWindows: false)
-        }
-
-        if result.imagesReceived > 0 {
-            windowManager.reloadOpenPreviewMedia()
-        }
-    }
-
-    @discardableResult
-    private func applyRemoteCatalog(
-        _ remote: [SyncNotePayload],
-        peerLabel: String?
-    ) -> SyncApplyAck {
-        let roots = scanConfig.syncedURLs()
-        guard !roots.isEmpty else {
-            lastError = "No synced folder to receive notes."
-            return SyncApplyAck(errorDescription: "No synced folder")
-        }
-        // Prefer the marked Default folder when it is synced; else first synced root.
-        let createDir: URL = {
-            if let preferred = preferredCreateDirectory(),
-               roots.contains(where: { $0.standardizedFileURL == preferred.standardizedFileURL }) {
-                return preferred
-            }
-            return roots[0]
-        }()
-        do {
-            let result = try SyncCatalogBuilder.applyRemoteCatalog(
-                remote,
-                roots: roots,
-                createDirectory: createDir,
-                peerLabel: peerLabel,
-                conflictRole: .mergeAuthority
-            )
-            // Surface received notes at the top of the list (sort uses lastOpenedAt + inbound).
-            let receivedAt = Date()
-            for path in result.appliedPaths {
-                stateStore.touchLastOpened(path, at: receivedAt)
-            }
-            syncInboundPaths = Set(result.appliedPaths.map { $0.standardizedFileURL.path })
-            rescan(restoreWindows: false)
-            return SyncApplyAck(
-                appliedIDs: result.appliedIDs,
-                conflicts: result.conflicts,
-                awaitingAuthorityMerge: result.awaitingAuthorityMerge
-            )
-        } catch {
-            lastError = "Could not apply sync: \(error.localizedDescription)"
-            return SyncApplyAck(errorDescription: error.localizedDescription)
-        }
-    }
 
     func addScanFolder() {
         if scanConfig.addFolder() {
@@ -576,39 +339,41 @@ final class NoteStore: ObservableObject {
         refreshSyncAdvertising()
     }
 
+
     func rescan(restoreWindows: Bool = false) {
         isScanning = true
         lastError = nil
         scanConfig.reload()
         let roots = scanConfig.effectiveScanURLs()
         let scanned = NoteScanner.scan(roots: roots, config: scanConfig.config)
-            .filter { !NoteFrontmatter.isTrashed(file: $0.path) }
+            .filter { !NoteFrontmatter.isLegacyTrash(file: $0.path, roots: roots) }
         let previous = Dictionary(notes.map { ($0.path.path, $0) }, uniquingKeysWith: { _, new in new })
+        let openIDs = windowManager.openNoteIDs()
         notes = scanned
+        stateStore.migrateLegacyKeys(for: scanned.map(\.path))
         sortNotes()
 
         let newPaths = Set(scanned.map(\.path.path))
         for path in previous.keys where !newPaths.contains(path) {
+            // An open note that moved (sync, Finder) keeps its window.
+            if let id = openIDs[path],
+               let moved = scanned.first(where: { previous[$0.path.path] == nil && idIndex.entry(for: $0.path).id == id }) {
+                windowManager.noteMoved(from: URL(fileURLWithPath: path), to: moved.path, title: moved.title)
+                continue
+            }
             windowManager.handleNoteRemoved(path: URL(fileURLWithPath: path))
         }
 
         for note in scanned {
-            if let old = previous[note.path.path],
-               old.modifiedAt != note.modifiedAt,
-               windowManager.isOpen(note.path) {
-                if let content = try? String(contentsOf: note.path, encoding: .utf8) {
-                    let ensured = NoteFrontmatter.ensuringSyncID(content)
-                    if ensured.didChange {
-                        let previous = note.modifiedAt
-                        try? ensured.markdown.write(to: note.path, atomically: true, encoding: .utf8)
-                        try? FileManager.default.setAttributes(
-                            [.modificationDate: previous],
-                            ofItemAtPath: note.path.path
-                        )
-                    }
-                    windowManager.reloadIfOpen(note: note, content: ensured.markdown)
-                }
-            }
+            guard let old = previous[note.path.path], old.modifiedAt != note.modifiedAt,
+                  windowManager.isOpen(note.path),
+                  let data = try? Data(contentsOf: note.path)
+            else { continue }
+            windowManager.reloadIfOpen(
+                note: note,
+                content: String(decoding: data, as: UTF8.self),
+                hash: NoteHashing.fileHash(data)
+            )
         }
 
         isScanning = false
@@ -625,7 +390,7 @@ final class NoteStore: ObservableObject {
         let url = NoteFilename.uniqueURL(in: directory, date: Date(), title: effectiveTitle)
         let initial = NoteFrontmatter.initialDocument(
             title: effectiveTitle,
-            createdOn: syncService.deviceName
+            createdOn: deviceName
         )
         do {
             try initial.write(to: url, atomically: true, encoding: .utf8)
@@ -759,13 +524,8 @@ final class NoteStore: ObservableObject {
     }
 
     /// Recent opens first; never-opened by file mtime; explicitly removed-from-recents last.
-    /// Just-received sync inbound notes are also opened-touched so they float to the top.
     private func sortNotes() {
         notes = notes.sorted { lhs, rhs in
-            let leftInbound = syncInboundPaths.contains(lhs.path.standardizedFileURL.path)
-            let rightInbound = syncInboundPaths.contains(rhs.path.standardizedFileURL.path)
-            if leftInbound != rightInbound { return leftInbound && !rightInbound }
-
             let leftState = stateStore.storedState(for: lhs.path)
             let rightState = stateStore.storedState(for: rhs.path)
             let leftBuried = leftState?.removedFromRecentsAt != nil

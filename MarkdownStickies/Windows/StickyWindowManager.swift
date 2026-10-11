@@ -8,6 +8,7 @@ final class StickyWindowManager: ObservableObject {
     /// Path of the sticky that currently is the key window (if any).
     @Published private(set) var activePath: String?
 
+    /// Runtime maps stay keyed by path (spec §2.3); saved state is keyed by `stickies-id`.
     private var controllers: [String: StickyWindowController] = [:]
     /// Hibernated stickies per set index — set switch reuses these instead of rebuilding editors.
     private var parkedBySet: [Int: [String: StickyWindowController]] = [:]
@@ -22,8 +23,20 @@ final class StickyWindowManager: ObservableObject {
         self.noteStore = noteStore
     }
 
+    var writer: NoteWriter? { noteStore?.writer }
+    var deviceName: String { noteStore?.deviceName ?? "Mac" }
+
     func isOpen(_ path: URL) -> Bool {
         controllers[path.path] != nil
+    }
+
+    /// Ids of open stickies (for following moves after a sync).
+    func openNoteIDs() -> [String: UUID] {
+        var result: [String: UUID] = [:]
+        for path in controllers.keys {
+            if let id = noteStore?.idIndex.entry(for: URL(fileURLWithPath: path)).id { result[path] = id }
+        }
+        return result
     }
 
     func open(note: Note, makeKey: Bool = true) {
@@ -37,27 +50,23 @@ final class StickyWindowManager: ObservableObject {
             return
         }
 
-        let content: String
-        do {
-            let raw = try String(contentsOf: note.path, encoding: .utf8)
-            let ensured = NoteFrontmatter.ensuringSyncID(raw)
-            content = ensured.markdown
-            if ensured.didChange {
-                try? writePreservingModifiedDate(ensured.markdown, to: note.path)
-            }
-        } catch {
-            content = NoteFrontmatter.initialDocument(
-                title: note.title,
-                createdOn: noteStore?.syncService.deviceName
-            )
-            try? content.write(to: note.path, atomically: true, encoding: .utf8)
+        guard let prepared = prepareForOpening(note.path) else {
+            let alert = NSAlert()
+            alert.messageText = "Couldn’t Open “\(note.title)”"
+            alert.informativeText = "The file can’t be read."
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return
         }
 
         // Open stickies are remembered on the active set’s layout (not note ownership).
-        let state = stateStore.state(for: note.path)
+        var state = stateStore.state(for: note.path)
+        if let color = prepared.color { state.color = color }
         let controller = StickyWindowController(
             note: note,
-            content: content,
+            content: prepared.text,
+            loadedHash: prepared.hash,
+            isReadOnly: prepared.notice != nil,
             state: state,
             manager: self
         )
@@ -65,12 +74,67 @@ final class StickyWindowManager: ObservableObject {
         openPaths.insert(note.path.path)
         stateStore.setOpen(note.path, isOpen: true)
         stateStore.touchLastOpened(note.path)
+        if let color = prepared.color { stateStore.setColor(note.path, color: color) }
         if makeKey {
             controller.show()
         } else {
             controller.wake(makeKey: false)
         }
         noteStore?.noteDidOpen(path: note.path)
+
+        if let notice = prepared.notice {
+            let alert = NSAlert()
+            alert.messageText = "“\(note.title)” Opens Read-Only"
+            alert.informativeText = notice
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }
+    }
+
+    private struct Prepared {
+        var text: String
+        var hash: String
+        var color: NoteColor?
+        /// Set when the note opens read-only.
+        var notice: String?
+    }
+
+    /// Opening "touches" the note (spec §2.2): adds `stickies-id` once, and moves a non-default
+    /// local color into `stickies-color`. Never writes anything else; a file that can't be read
+    /// as UTF-8 or can't be written opens read-only instead.
+    private func prepareForOpening(_ path: URL) -> Prepared? {
+        guard let data = try? Data(contentsOf: path) else { return nil }
+        let hash = NoteHashing.fileHash(data)
+        guard let text = String(data: data, encoding: .utf8) else {
+            return Prepared(
+                text: String(decoding: data, as: UTF8.self),
+                hash: hash,
+                notice: "This file isn’t UTF-8 text. It’s shown read-only and doesn’t sync."
+            )
+        }
+
+        var updated = StickiesFrontmatter.ensuringID(in: data).data
+        let fileColor = StickiesFrontmatter.color(in: updated).map(NoteColor.init(frontmatter:))
+        if StickiesFrontmatter.value(for: StickiesFrontmatter.colorKey, in: updated) == nil,
+           let local = stateStore.storedState(for: path)?.color, local != .default {
+            updated = StickiesFrontmatter.settingColor(local.frontmatter, in: updated)
+        }
+        guard updated != data else { return Prepared(text: text, hash: hash, color: fileColor) }
+
+        do {
+            let newHash = try writer?.write(updated, to: path, expect: .hash(hash), origin: .app) ?? hash
+            noteStore?.idIndex.invalidate(path)
+            noteStore?.noteFileDidSave(path: path, modifiedAt: Date())
+            stateStore.migrateLegacyKeys(for: [path])
+            return Prepared(text: String(decoding: updated, as: UTF8.self), hash: newHash, color: fileColor)
+        } catch {
+            return Prepared(
+                text: text,
+                hash: hash,
+                color: fileColor,
+                notice: "Markdown Stickies can’t write to this file. It’s shown read-only and doesn’t sync."
+            )
+        }
     }
 
     func close(path: URL) {
@@ -115,6 +179,13 @@ final class StickyWindowManager: ObservableObject {
         }
     }
 
+    /// Saves every open sticky and waits until the files are written (before a sync).
+    func saveAllOpenAndWait() async {
+        for controller in Array(controllers.values) {
+            await controller.saveAndWait()
+        }
+    }
+
     /// Hibernate every sticky but keep them listed as open for the current set.
     /// Controllers stay warm in `parkedBySet` so switching back is cheap.
     func parkAllForSetSwitch() {
@@ -126,7 +197,7 @@ final class StickyWindowManager: ObservableObject {
                 stateStore.setFrame(URL(fileURLWithPath: path), frame: controller.frame)
             }
         }
-        stateStore.replaceOpenPaths(paths, inSet: setIndex)
+        stateStore.replaceOpenPaths(paths.map { URL(fileURLWithPath: $0) }, inSet: setIndex)
 
         var bag: [String: StickyWindowController] = [:]
         for path in paths {
@@ -156,28 +227,28 @@ final class StickyWindowManager: ObservableObject {
     }
 
     func restoreOpenNotes(from notes: [Note]) {
-        let byPath = Dictionary(notes.map { ($0.path.path, $0) }, uniquingKeysWith: { _, new in new })
-        let setIndex = stateStore.activeSet
-        let planned = stateStore.openPaths(inSet: setIndex).compactMap { path -> (String, Note)? in
-            guard let note = byPath[path] else { return nil }
-            return (path, note)
+        // Saved layouts hold keys (`id:<uuid>` or a legacy path).
+        var byKey: [String: Note] = [:]
+        for note in notes {
+            byKey[note.path.path] = note
+            byKey[stateStore.key(for: note.path)] = note
         }
+        let setIndex = stateStore.activeSet
+        let planned = stateStore.openPaths(inSet: setIndex).compactMap { byKey[$0] }
         var bag = parkedBySet.removeValue(forKey: setIndex) ?? [:]
-        var kept: [String] = []
+        var kept: [URL] = []
 
-        for (index, item) in planned.enumerated() {
-            let pathString = item.0
-            let note = item.1
+        for (index, note) in planned.enumerated() {
+            let pathString = note.path.path
             let isLast = index == planned.count - 1
             if let hibernated = bag.removeValue(forKey: pathString) {
                 controllers[pathString] = hibernated
                 openPaths.insert(pathString)
                 hibernated.wake(makeKey: isLast)
-                kept.append(pathString)
             } else {
                 open(note: note, makeKey: isLast)
-                kept.append(pathString)
             }
+            kept.append(note.path)
         }
 
         // Controllers parked for paths that are no longer in this set.
@@ -198,19 +269,26 @@ final class StickyWindowManager: ObservableObject {
         stateStore.remove(path: path)
     }
 
-    func reloadIfOpen(note: Note, content: String) {
-        controllers[note.path.path]?.applyExternalContent(content)
+    /// A note moved (sync or Finder): the open sticky follows it instead of closing.
+    func noteMoved(from oldPath: URL, to newPath: URL, title: String) {
+        guard let controller = controllers.removeValue(forKey: oldPath.path) else { return }
+        controllers[newPath.path] = controller
+        openPaths.remove(oldPath.path)
+        openPaths.insert(newPath.path)
+        if activePath == oldPath.path { activePath = newPath.path }
+        controller.applyRenamedPath(newPath, displayTitle: title)
     }
 
-    /// Merge authority: replace open editor even if dirty, and invalidate in-flight saves.
-    func forceReloadIfOpen(note: Note, content: String) {
-        controllers[note.path.path]?.forceApplyExternalContent(content)
+    /// The file changed on disk: a clean sticky reloads; one with unsaved edits keeps them
+    /// (its next save notices the change and writes a conflict copy).
+    func reloadIfOpen(note: Note, content: String, hash: String) {
+        controllers[note.path.path]?.applyExternalContent(content, hash: hash)
     }
 
-    /// Refresh open previews (e.g. after image assets sync).
-    func reloadOpenPreviewMedia() {
+    /// Refresh inline images (e.g. after a sync brought new ones).
+    func reloadInlineImages() {
         for controller in controllers.values {
-            controller.reloadPreviewMedia()
+            controller.reloadInlineImages()
         }
     }
 
@@ -256,12 +334,11 @@ final class StickyWindowManager: ObservableObject {
     }
 
     func noteDidSave(path: URL, modifiedAt: Date) {
+        noteStore?.idIndex.invalidate(path)
         noteStore?.noteFileDidSave(path: path, modifiedAt: modifiedAt)
     }
 
     /// Renames the on-disk `.md` file (slugified). Preserves date prefix when present.
-    /// Filename is the title source of truth — bumps mtime so LAN sync converges the name
-    /// (identical-body + divergent titles already merge via `SyncMerge`).
     @discardableResult
     func renameNote(path: URL, toTitle title: String) -> (path: URL, displayTitle: String)? {
         guard let controller = controllers[path.path] else { return nil }
@@ -269,19 +346,18 @@ final class StickyWindowManager: ObservableObject {
 
         let slug = NoteFilename.slugify(title)
         let displayTitle = NoteFilename.displayTitle(from: slug)
-
         let newURL = NoteFilename.uniqueRenamedURL(from: path, newTitle: title)
 
         if newURL.standardizedFileURL == path.standardizedFileURL {
-            touchForSync(path)
             controller.applyRenamedPath(path, displayTitle: displayTitle)
             noteStore?.noteDidRename(from: path, to: path, displayTitle: displayTitle)
             return (path, displayTitle)
         }
 
         do {
-            try FileManager.default.moveItem(at: path, to: newURL)
-            touchForSync(newURL)
+            guard let hash = NoteWriter.currentHash(of: path) else { return nil }
+            try writer?.move(from: path, to: newURL, expectHash: hash, origin: .app)
+            noteStore?.noteFileDidSave(path: newURL, modifiedAt: Date())
         } catch {
             return nil
         }
@@ -299,45 +375,24 @@ final class StickyWindowManager: ObservableObject {
         return (newURL, displayTitle)
     }
 
-    /// Moves the note into the vault `Trash/` folder (synced), closes the sticky, refreshes the list.
+    /// Moves the note to the macOS Trash, closes the sticky, refreshes the list.
     func deleteNote(path: URL) {
         if let controller = controllers[path.path] {
-            controller.saveNow()
-            controller.closePreservingFile()
+            controller.closeDiscardingEdits()
             controllers.removeValue(forKey: path.path)
             openPaths.remove(path.path)
         }
-        let roots = noteStore?.scanConfig.effectiveScanURLs() ?? []
         do {
-            let trashed = try NoteFrontmatter.moveToTrash(file: path, roots: roots)
-            stateStore.relocate(from: path, to: trashed)
-            stateStore.setOpen(trashed, isOpen: false)
+            guard let hash = NoteWriter.currentHash(of: path) else { throw NoteWriter.Failure.missing }
+            try writer?.trash(path, expectHash: hash, origin: .app)
+            stateStore.setOpen(path, isOpen: false)
             noteStore?.noteWasDeleted(path: path)
         } catch {
-            // Last resort: system Trash (won’t sync).
-            try? FileManager.default.trashItem(at: path, resultingItemURL: nil)
-            stateStore.remove(path: path)
-            noteStore?.noteWasDeleted(path: path)
-        }
-    }
-
-    /// Bump mtime so a rename wins the next LAN merge without rewriting the body.
-    private func touchForSync(_ url: URL) {
-        let now = Date()
-        try? FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: url.path)
-        noteStore?.noteFileDidSave(path: url, modifiedAt: now)
-    }
-
-    /// Stamp missing sync id without making the note look newly edited.
-    private func writePreservingModifiedDate(_ text: String, to url: URL) throws {
-        let previous = try url.resourceValues(forKeys: [.contentModificationDateKey])
-            .contentModificationDate
-        try text.write(to: url, atomically: true, encoding: .utf8)
-        if let previous {
-            try FileManager.default.setAttributes(
-                [.modificationDate: previous],
-                ofItemAtPath: url.path
-            )
+            let alert = NSAlert()
+            alert.messageText = "Couldn’t Move the Note to the Trash"
+            alert.informativeText = error.localizedDescription
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
         }
     }
 }

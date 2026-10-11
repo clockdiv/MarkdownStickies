@@ -8,7 +8,10 @@ import Foundation
 /// - an overwritten file is copied through `OverwriteBackup` first (`Backups/` or `.stickies-trash/`)
 ///
 /// Sync operations also refuse notes that have unsaved edits in an open editor.
-public actor NoteWriter {
+///
+/// Calls are serialized by a lock, so editor saves, app actions and sync steps never interleave.
+/// They are synchronous: call them off the main thread for large files.
+public final class NoteWriter: @unchecked Sendable {
     public enum Origin: Sendable {
         /// A sync step: refused while the note has unsaved edits.
         case sync
@@ -30,8 +33,9 @@ public actor NoteWriter {
 
     private let trashBin: TrashBin
     private let backup: OverwriteBackup
-    private let editors: EditorRegistry
-    public nonisolated let recentWrites: RecentWrites
+    public let editors: EditorRegistry
+    public let recentWrites: RecentWrites
+    private let lock = NSRecursiveLock()
 
     public init(
         trash: TrashBin,
@@ -48,6 +52,8 @@ public actor NoteWriter {
     /// Writes `data` to `url`. Returns the new file hash.
     @discardableResult
     public func write(_ data: Data, to url: URL, expect: SyncExpectation, origin: Origin) throws -> String {
+        lock.lock()
+        defer { lock.unlock() }
         let url = url.standardizedFileURL
         try checkEditor(url, origin: origin)
         switch expect {
@@ -84,6 +90,8 @@ public actor NoteWriter {
     /// Moves a file. The target must be free; a rename that only changes capitalization
     /// goes through a temporary visible name so it works on case-insensitive volumes.
     public func move(from source: URL, to target: URL, expectHash: String, origin: Origin) throws {
+        lock.lock()
+        defer { lock.unlock() }
         let source = source.standardizedFileURL
         let target = target.standardizedFileURL
         guard source.path != target.path else { return }
@@ -120,6 +128,8 @@ public actor NoteWriter {
 
     /// Moves a file to the trash after checking its hash.
     public func trash(_ url: URL, expectHash: String, origin: Origin) throws {
+        lock.lock()
+        defer { lock.unlock() }
         let url = url.standardizedFileURL
         try checkEditor(url, origin: origin)
         try checkHash(url, expected: expectHash)

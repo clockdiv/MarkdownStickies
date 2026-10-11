@@ -10,6 +10,9 @@ final class NoteStateStore: ObservableObject {
 
     private let fileURL: URL
     private var saveTask: Task<Void, Never>?
+    /// `stickies-id` of a note file (set by `NoteStore`). Notes with an id are keyed by it, so
+    /// their state survives renames and Finder moves; notes without one stay keyed by path.
+    var resolveID: ((URL) -> UUID?)?
 
     init() {
         try? MarkdownStickiesConfig.ensureDirectory()
@@ -37,19 +40,48 @@ final class NoteStateStore: ObservableObject {
         }
     }
 
+    /// Persistence key: `id:<uuid>` for tracked notes, the path otherwise.
+    func key(for path: URL) -> String {
+        resolveID?(path).map { "id:" + $0.uuidString } ?? path.path
+    }
+
     func state(for path: URL) -> NoteWindowState {
-        states[path.path] ?? .default()
+        storedState(for: path) ?? .default()
     }
 
     /// Stored window state only if this note already has an entry (e.g. was opened before).
+    /// Falls back to a path-keyed entry that hasn't been migrated yet.
     func storedState(for path: URL) -> NoteWindowState? {
-        states[path.path]
+        states[key(for: path)] ?? states[path.path]
+    }
+
+    /// Moves path-keyed entries of notes that now have an id to their id key.
+    /// Called after scans, never while a view reads state.
+    func migrateLegacyKeys(for paths: [URL]) {
+        var changed = false
+        var layouts = setOpenPaths
+        for path in paths {
+            let key = key(for: path)
+            guard key != path.path, let legacy = states[path.path] else { continue }
+            if states[key] == nil { states[key] = legacy }
+            states[path.path] = nil
+            for (set, keys) in layouts {
+                layouts[set] = keys.map { $0 == path.path ? key : $0 }
+            }
+            changed = true
+        }
+        if changed {
+            setOpenPaths = layouts
+            scheduleSave()
+        }
     }
 
     func update(_ path: URL, mutate: (inout NoteWindowState) -> Void) {
-        var current = state(for: path)
+        let key = key(for: path)
+        var current = states[key] ?? states[path.path] ?? .default()
+        if key != path.path { states[path.path] = nil }
         mutate(&current)
-        states[path.path] = current
+        states[key] = current
         scheduleSave()
     }
 
@@ -62,26 +94,27 @@ final class NoteStateStore: ObservableObject {
 
     /// Mark a note open/closed in the **active** set’s layout.
     func setOpen(_ path: URL, isOpen: Bool) {
+        let key = key(for: path)
         var layouts = setOpenPaths
-        var paths = Set(layouts[activeSet] ?? [])
+        var keys = Set(layouts[activeSet] ?? [])
         if isOpen {
-            paths.insert(path.path)
-            if states[path.path] == nil {
-                states[path.path] = .default()
+            keys.insert(key)
+            if states[key] == nil {
+                states[key] = .default()
             }
         } else {
-            paths.remove(path.path)
+            keys.remove(key)
         }
-        layouts[activeSet] = Array(paths).sorted()
+        layouts[activeSet] = Array(keys).sorted()
         setOpenPaths = layouts
         scheduleSave()
     }
 
-    /// Replace the open-path list for a set (used when parking before a switch).
-    func replaceOpenPaths(_ paths: [String], inSet set: Int) {
+    /// Replace the open-note list for a set (used when parking before a switch).
+    func replaceOpenPaths(_ paths: [URL], inSet set: Int) {
         let index = NoteWindowState.clampedSetIndex(set)
         var layouts = setOpenPaths
-        layouts[index] = Array(Set(paths)).sorted()
+        layouts[index] = Array(Set(paths.map(key(for:)))).sorted()
         setOpenPaths = layouts
         scheduleSave()
     }
@@ -102,7 +135,7 @@ final class NoteStateStore: ObservableObject {
             $0.floatOnTop = false
             $0.isOpen = false
         }
-        let key = path.path
+        let key = key(for: path)
         var layouts = setOpenPaths
         for (set, paths) in layouts {
             layouts[set] = paths.filter { $0 != key }
@@ -136,15 +169,16 @@ final class NoteStateStore: ObservableObject {
         update(path) { $0.floatOnTop = value }
     }
 
-    /// Paths open in a given set (defaults to the active set).
+    /// Keys (see `key(for:)`) of the notes open in a set (defaults to the active set).
     func openPaths(inSet set: Int? = nil) -> [String] {
         let target = NoteWindowState.clampedSetIndex(set ?? activeSet)
         return setOpenPaths[target] ?? []
     }
 
+    /// Only matters for path-keyed notes; id-keyed state follows the note by itself.
     func relocate(from oldPath: URL, to newPath: URL) {
         let oldKey = oldPath.path
-        let newKey = newPath.path
+        let newKey = key(for: newPath)
         guard oldKey != newKey else { return }
         if let existing = states.removeValue(forKey: oldKey) {
             states[newKey] = existing
@@ -159,6 +193,8 @@ final class NoteStateStore: ObservableObject {
         scheduleSave()
     }
 
+    /// Forgets path-keyed state for a vanished file. Id-keyed state is kept: the note may
+    /// just have moved, and it finds its state again by id.
     func remove(path: URL) {
         let key = path.path
         states.removeValue(forKey: key)

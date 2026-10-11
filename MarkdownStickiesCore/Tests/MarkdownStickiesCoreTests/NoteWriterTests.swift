@@ -61,7 +61,7 @@ final class NoteWriterTests: XCTestCase {
     // MARK: - write
 
     func testWriteNewFileCreatesFoldersAndReturnsHash() async throws {
-        let hash = try await writer.write(Data("new".utf8), to: url("a/b/new.md"), expect: .absent, origin: .sync)
+        let hash = try writer.write(Data("new".utf8), to: url("a/b/new.md"), expect: .absent, origin: .sync)
         XCTAssertEqual(read("a/b/new.md"), "new")
         XCTAssertEqual(hash, NoteHashing.fileHash(Data("new".utf8)))
         XCTAssertTrue(writer.recentWrites.contains(url("a/b/new.md")))
@@ -70,14 +70,14 @@ final class NoteWriterTests: XCTestCase {
     func testWriteAbsentRefusesExistingFileEvenWithOtherCase() async throws {
         _ = try put("old", "Idea.md")
         await assertFails(.alreadyExists) {
-            try await self.writer.write(Data("x".utf8), to: self.url("idea.md"), expect: .absent, origin: .sync)
+            try self.writer.write(Data("x".utf8), to: self.url("idea.md"), expect: .absent, origin: .sync)
         }
         XCTAssertEqual(read("Idea.md"), "old")
     }
 
     func testOverwriteChecksHashAndKeepsACopy() async throws {
         let hash = try put("old", "idea.md")
-        try await writer.write(Data("new".utf8), to: url("idea.md"), expect: .hash(hash), origin: .sync)
+        try writer.write(Data("new".utf8), to: url("idea.md"), expect: .hash(hash), origin: .sync)
         XCTAssertEqual(read("idea.md"), "new")
         XCTAssertEqual(trashed("idea.md"), "old", "rule 3: the previous version is kept")
     }
@@ -85,14 +85,14 @@ final class NoteWriterTests: XCTestCase {
     func testOverwriteRefusesChangedFile() async throws {
         _ = try put("edited meanwhile", "idea.md")
         await assertFails(.changedOnDisk(expected: "", found: "")) {
-            try await self.writer.write(Data("new".utf8), to: self.url("idea.md"), expect: .hash("stale"), origin: .sync)
+            try self.writer.write(Data("new".utf8), to: self.url("idea.md"), expect: .hash("stale"), origin: .sync)
         }
         XCTAssertEqual(read("idea.md"), "edited meanwhile")
     }
 
     func testOverwriteOfMissingFileFails() async {
         await assertFails(.missing) {
-            try await self.writer.write(Data("new".utf8), to: self.url("gone.md"), expect: .hash("h"), origin: .sync)
+            try self.writer.write(Data("new".utf8), to: self.url("gone.md"), expect: .hash("h"), origin: .sync)
         }
         XCTAssertNil(read("gone.md"))
     }
@@ -101,9 +101,9 @@ final class NoteWriterTests: XCTestCase {
         let hash = try put("old", "idea.md")
         editors.setUnsavedEdits(true, for: url("idea.md"))
         await assertFails(.unsavedEdits) {
-            try await self.writer.write(Data("sync".utf8), to: self.url("idea.md"), expect: .hash(hash), origin: .sync)
+            try self.writer.write(Data("sync".utf8), to: self.url("idea.md"), expect: .hash(hash), origin: .sync)
         }
-        try await writer.write(Data("editor".utf8), to: url("idea.md"), expect: .hash(hash), origin: .app)
+        try writer.write(Data("editor".utf8), to: url("idea.md"), expect: .hash(hash), origin: .app)
         XCTAssertEqual(read("idea.md"), "editor")
 
         editors.setUnsavedEdits(false, for: url("idea.md"))
@@ -112,7 +112,7 @@ final class NoteWriterTests: XCTestCase {
 
     func testNoTempFilesAreLeftBehind() async throws {
         let hash = try put("old", "idea.md")
-        try await writer.write(Data("new".utf8), to: url("idea.md"), expect: .hash(hash), origin: .sync)
+        try writer.write(Data("new".utf8), to: url("idea.md"), expect: .hash(hash), origin: .sync)
         let names = try FileManager.default.contentsOfDirectory(atPath: vault.path)
         XCTAssertFalse(names.contains { $0.contains("stickies-tmp") })
     }
@@ -121,7 +121,7 @@ final class NoteWriterTests: XCTestCase {
 
     func testMoveChecksHashAndCreatesFolders() async throws {
         let hash = try put("text", "idea.md")
-        try await writer.move(from: url("idea.md"), to: url("sub/plan.md"), expectHash: hash, origin: .sync)
+        try writer.move(from: url("idea.md"), to: url("sub/plan.md"), expectHash: hash, origin: .sync)
         XCTAssertNil(read("idea.md"))
         XCTAssertEqual(read("sub/plan.md"), "text")
     }
@@ -130,7 +130,7 @@ final class NoteWriterTests: XCTestCase {
         let hash = try put("mine", "idea.md")
         _ = try put("other", "Plan.md")
         await assertFails(.alreadyExists) {
-            try await self.writer.move(from: self.url("idea.md"), to: self.url("plan.md"), expectHash: hash, origin: .sync)
+            try self.writer.move(from: self.url("idea.md"), to: self.url("plan.md"), expectHash: hash, origin: .sync)
         }
         XCTAssertEqual(read("idea.md"), "mine")
         XCTAssertEqual(read("Plan.md"), "other")
@@ -139,14 +139,14 @@ final class NoteWriterTests: XCTestCase {
     func testMoveRefusesChangedSource() async throws {
         _ = try put("changed", "idea.md")
         await assertFails(.changedOnDisk(expected: "", found: "")) {
-            try await self.writer.move(from: self.url("idea.md"), to: self.url("plan.md"), expectHash: "stale", origin: .sync)
+            try self.writer.move(from: self.url("idea.md"), to: self.url("plan.md"), expectHash: "stale", origin: .sync)
         }
         XCTAssertEqual(read("idea.md"), "changed")
     }
 
     func testCapitalizationOnlyRename() async throws {
         let hash = try put("text", "Idea.md")
-        try await writer.move(from: url("Idea.md"), to: url("idea.md"), expectHash: hash, origin: .sync)
+        try writer.move(from: url("Idea.md"), to: url("idea.md"), expectHash: hash, origin: .sync)
         let names = try FileManager.default.contentsOfDirectory(atPath: vault.path)
         XCTAssertTrue(names.contains("idea.md"))
         XCTAssertFalse(names.contains("Idea.md"))
@@ -157,7 +157,7 @@ final class NoteWriterTests: XCTestCase {
 
     func testTrashChecksHashAndMovesIntoDatedTrash() async throws {
         let hash = try put("bye", "sub/idea.md")
-        try await writer.trash(url("sub/idea.md"), expectHash: hash, origin: .sync)
+        try writer.trash(url("sub/idea.md"), expectHash: hash, origin: .sync)
         XCTAssertNil(read("sub/idea.md"))
         XCTAssertEqual(trashed("sub/idea.md"), "bye")
     }
@@ -165,16 +165,16 @@ final class NoteWriterTests: XCTestCase {
     func testTrashRefusesChangedFile() async throws {
         _ = try put("edited", "idea.md")
         await assertFails(.changedOnDisk(expected: "", found: "")) {
-            try await self.writer.trash(self.url("idea.md"), expectHash: "stale", origin: .sync)
+            try self.writer.trash(self.url("idea.md"), expectHash: "stale", origin: .sync)
         }
         XCTAssertEqual(read("idea.md"), "edited")
     }
 
     func testTrashingTheSameNameTwiceKeepsBoth() async throws {
         let first = try put("one", "idea.md")
-        try await writer.trash(url("idea.md"), expectHash: first, origin: .sync)
+        try writer.trash(url("idea.md"), expectHash: first, origin: .sync)
         let second = try put("two", "idea.md")
-        try await writer.trash(url("idea.md"), expectHash: second, origin: .sync)
+        try writer.trash(url("idea.md"), expectHash: second, origin: .sync)
         XCTAssertEqual(trashed("idea.md"), "one")
         XCTAssertEqual(trashed("idea (2).md"), "two")
     }

@@ -21,6 +21,23 @@ public enum ImageReferences {
         return result
     }
 
+    /// File URL an editor shows or opens for an image destination: web and `file:` URLs as they
+    /// are, relative paths resolved against the note's folder (percent-decoded). No fallback
+    /// by file name, so a broken reference shows as broken.
+    public static func fileURL(forDestination raw: String, noteDirectory: URL) -> URL? {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return nil }
+        let lower = trimmed.lowercased()
+        if lower.hasPrefix("http://") || lower.hasPrefix("https://") || lower.hasPrefix("file:") {
+            return URL(string: trimmed)
+        }
+        guard !hasScheme(trimmed), !trimmed.hasPrefix("/") else { return nil }
+        let decoded = trimmed.removingPercentEncoding ?? trimmed
+        let ext = (decoded as NSString).pathExtension.lowercased()
+        guard PathRules.imageExtensions.contains(ext) else { return nil }
+        return noteDirectory.appendingPathComponent(decoded).standardizedFileURL
+    }
+
     /// Image destinations as written in the note, before resolving.
     static func rawDestinations(in markdown: String) -> [String] {
         var result: [String] = []
