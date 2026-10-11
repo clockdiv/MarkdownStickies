@@ -229,21 +229,25 @@ There is no per-note "sync" toggle and, for now, no "remove frontmatter" action.
 
 ```
 <Vault>/                           # chosen by the user, "On My iPhone"
-  .stickies-vault                  # JSON: vaultId, generation, macDeviceId, roots {rootId → folderName}
-  .stickies-trash/<date>/<root>/…  # trash, kept 30 days
+  Stickies Trash/<date>/<root>/…   # trash, kept 30 days; never synced or listed
   New idea.md                      # Inbox: new iOS note, placed at the next sync
   ProjectA/                        # one root folder per synced Mac root
     docs/idea.md
     docs/idea-img-20261011-101500.png
   Notes/
   Notes (2)/                       # second Mac root that is also named "Notes"
+
+App storage (not in the vault): Vaults/<hash of the vault path>.json
+                                   # vault id, Mac device id, roots {rootId → folderName}
 ```
+
+**Nothing with a leading dot is created in the vault.** iOS "On My iPhone" folders refuse such names (found in testing, 2026-10-11). The vault info lives in the app's own storage, the trash is a visible folder (`Stickies Trash`, a name no root folder can take), and the writer's temp files have visible names that don't end in `.md`.
 
 **Root folders:**
 
 - Each synced root has a stable `rootId`. It's a UUID stored in the Mac's config next to `syncedScanRootPaths`, plus a copy in the sync state (`roots.json`, §2.6), so a root that is later removed can still be resolved.
 - Each root has a **folder name on iOS**: the root folder's name, with ` (2)`, ` (3)` added on collisions. The Mac assigns the name once. **A name, once given, is never reassigned to another root,** even after that root is removed.
-- The mapping `rootId → folderName` is written into `.stickies-vault` at every commit. iOS uses only this file to find root folders.
+- The mapping `rootId → folderName` is saved in the vault info at every sync. iOS uses only that to find root folders.
 - **A root folder missing on iOS** (renamed, moved or deleted in Files) **aborts the sync,** naming the folder (§3.8). It never turns into "all notes deleted".
 
 **Inbox (top level of the vault):**
@@ -902,3 +906,7 @@ References are to `docs/rewrite-spec-review.md`.
 
 - `stickies-color` is written for every opened note, yellow included (no "absent = default" shortcut).
 - The Mac no longer stores colors in `note-state.json`; an old stored color is moved into the note on its next open and then dropped. The note list reads colors from the files (cached with the ids).
+
+### Revision 3.2 (2026-10-11): no hidden files in the iOS vault
+
+- Testing showed that "On My iPhone" folders refuse names starting with a dot. The vault info moved to app storage, the iOS trash is the visible `Stickies Trash` folder, and temp files have visible names.

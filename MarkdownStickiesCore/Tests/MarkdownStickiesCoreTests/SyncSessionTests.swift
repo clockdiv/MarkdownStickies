@@ -93,7 +93,7 @@ final class SyncSessionTests: XCTestCase {
         async let macOutcome = MacSyncSession.run(connection: macSide, configuration: macConfiguration, writer: macWriter, hooks: hooks)
         async let iosOutcome = IOSSyncResponder.run(
             connection: iosSide,
-            configuration: .init(deviceID: phoneID, deviceName: "iPhone", vault: vault),
+            configuration: .init(deviceID: phoneID, deviceName: "iPhone", vault: vault, storage: dir.appendingPathComponent("ios-storage")),
             writer: iosWriter
         )
         return await Run(mac: macOutcome, ios: iosOutcome)
@@ -162,7 +162,7 @@ final class SyncSessionTests: XCTestCase {
         let run = await sync()
         XCTAssertEqual(run.macSummary?.trashed, 1)
         XCTAssertNil(text(mac("idea.md")))
-        XCTAssertEqual(notes(under: dir.appendingPathComponent("mac-trash/.stickies-trash"))[a], note(a, "one"))
+        XCTAssertEqual(notes(under: dir.appendingPathComponent("mac-trash/Stickies Trash"))[a], note(a, "one"))
 
         _ = await sync()
         XCTAssertNil(text(mac("idea.md")))
@@ -190,7 +190,7 @@ final class SyncSessionTests: XCTestCase {
         XCTAssertEqual(text(phone(copyName)), copy)
 
         let store = SyncStateStore(directory: SyncStateStore.directory(
-            in: dir.appendingPathComponent("state"), deviceID: phoneID, vaultID: try VaultScanner.loadOrCreateInfo(vault: vault).vaultID
+            in: dir.appendingPathComponent("state"), deviceID: phoneID, vaultID: try VaultScanner.loadOrCreateInfo(vault: vault, storage: dir.appendingPathComponent("ios-storage")).vaultID
         ))
         XCTAssertEqual(store.conflictBase(for: copyID).map { String(decoding: $0, as: UTF8.self) }, note(a, "base"))
 

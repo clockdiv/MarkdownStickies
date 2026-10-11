@@ -1,6 +1,8 @@
 import Foundation
 
-/// `.stickies-vault` at the top of the iOS vault (spec §2.5).
+/// What the iOS app knows about its vault (spec §2.5). Kept in the app's own storage, keyed by
+/// the vault folder: "On My iPhone" folders refuse files starting with a dot, and nothing of
+/// the sync needs to live in the user's folder.
 public struct VaultInfo: Codable, Equatable, Sendable {
     public struct RootFolder: Codable, Hashable, Sendable {
         public var rootID: UUID
@@ -30,7 +32,8 @@ public struct VaultInfo: Codable, Equatable, Sendable {
 /// Builds the iOS manifest from the vault: root folders plus the Inbox (vault top level).
 /// iOS never reads scan.conf; the Mac decides what is allowed.
 public enum VaultScanner {
-    public static let infoFilename = ".stickies-vault"
+    /// Top-level vault folders that are never root folders.
+    public static let reservedFolderNames: Set<String> = [FolderTrash.folderName]
 
     public enum Failure: Error, Equatable, Sendable {
         case vaultUnreadable
@@ -40,18 +43,27 @@ public enum VaultScanner {
 
     // MARK: - Vault info
 
-    public static func loadOrCreateInfo(vault: URL) throws -> VaultInfo {
-        let url = vault.appendingPathComponent(infoFilename)
+    /// `<storage>/Vaults/<hash of the vault path>.json`. Choosing another folder means another
+    /// vault, which the Mac syncs as a first sync (no deletes).
+    public static func infoURL(vault: URL, storage: URL) -> URL {
+        let key = NoteHashing.fileHash(Data(vault.standardizedFileURL.path.utf8))
+        return storage.appendingPathComponent("Vaults", isDirectory: true).appendingPathComponent("\(key).json")
+    }
+
+    public static func loadOrCreateInfo(vault: URL, storage: URL) throws -> VaultInfo {
+        let url = infoURL(vault: vault, storage: storage)
         if FileManager.default.fileExists(atPath: url.path) {
             return try JSONDecoder().decode(VaultInfo.self, from: Data(contentsOf: url))
         }
         let info = VaultInfo()
-        try saveInfo(info, vault: vault)
+        try saveInfo(info, vault: vault, storage: storage)
         return info
     }
 
-    public static func saveInfo(_ info: VaultInfo, vault: URL) throws {
-        try JSONEncoder.sorted.encode(info).write(to: vault.appendingPathComponent(infoFilename), options: .atomic)
+    public static func saveInfo(_ info: VaultInfo, vault: URL, storage: URL) throws {
+        let url = infoURL(vault: vault, storage: storage)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder.sorted.encode(info).write(to: url, options: .atomic)
     }
 
     /// Takes the Mac's root list (session step 2). New roots get their folder (created if needed);

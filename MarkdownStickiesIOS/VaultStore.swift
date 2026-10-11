@@ -55,6 +55,11 @@ final class VaultStore: ObservableObject {
     let fileChanges = PassthroughSubject<SyncFileChange, Never>()
 
     private var vaultInfo: VaultInfo?
+    /// App-owned storage for the vault info (nothing of the sync lives in the user's folder).
+    private static var storage: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("MarkdownStickies", isDirectory: true)
+    }
     private var editorSavers: [UUID: () -> Void] = [:]
     private var cancellables = Set<AnyCancellable>()
 
@@ -206,7 +211,8 @@ final class VaultStore: ObservableObject {
         let configuration = IOSSyncResponder.Configuration(
             deviceID: sync.deviceID,
             deviceName: deviceDisplayName,
-            vault: root
+            vault: root,
+            storage: Self.storage
         )
         let hooks = IOSSyncResponder.Hooks(
             saveOpenEditors: { [weak self] in await self?.saveOpenEditors() },
@@ -214,12 +220,12 @@ final class VaultStore: ObservableObject {
             progress: progress
         )
         let outcome = await IOSSyncResponder.run(connection: connection, configuration: configuration, writer: writer, hooks: hooks)
-        vaultInfo = try? VaultScanner.loadOrCreateInfo(vault: root)
+        vaultInfo = try? VaultScanner.loadOrCreateInfo(vault: root, storage: Self.storage)
         return outcome
     }
 
     private func publishChange(_ action: SyncAction) {
-        guard let root = rootURL, let info = try? VaultScanner.loadOrCreateInfo(vault: root) else { return }
+        guard let root = rootURL, let info = try? VaultScanner.loadOrCreateInfo(vault: root, storage: Self.storage) else { return }
         func url(_ location: NoteLocation) -> URL? {
             VaultScanner.url(for: location, vault: root, info: info)?.standardizedFileURL
         }
@@ -312,7 +318,7 @@ final class VaultStore: ObservableObject {
         let trash = FolderTrash(vault: root)
         writer = NoteWriter(trash: trash, backup: trash, editors: editors)
         trash.purge()
-        vaultInfo = try? VaultScanner.loadOrCreateInfo(vault: root)
+        vaultInfo = try? VaultScanner.loadOrCreateInfo(vault: root, storage: Self.storage)
         let isCloud = (try? root.resourceValues(forKeys: [.isUbiquitousItemKey]))?.isUbiquitousItem == true
         folderWarning = isCloud
             ? "This folder is in iCloud Drive. Files iCloud removed from this device are skipped during syncs. A folder “On My iPhone” works best."
@@ -330,11 +336,13 @@ final class VaultStore: ObservableObject {
         isScanning = true
         let scanRoot = root
         Task.detached(priority: .userInitiated) {
+            let trash = scanRoot.appendingPathComponent(FolderTrash.folderName).standardizedFileURL.path + "/"
             let scanned = NoteScanner.scan(roots: [scanRoot], config: .empty)
+                .filter { !$0.path.standardizedFileURL.path.hasPrefix(trash) }
             await MainActor.run {
                 // Ignore stale results if the folder changed mid-scan.
                 guard self.rootURL?.standardizedFileURL == scanRoot.standardizedFileURL else { return }
-                self.vaultInfo = try? VaultScanner.loadOrCreateInfo(vault: scanRoot)
+                self.vaultInfo = try? VaultScanner.loadOrCreateInfo(vault: scanRoot, storage: Self.storage)
                 self.notes = Self.sortedNotes(scanned, lastOpened: self.lastOpenedAt)
                 self.isScanning = false
             }
@@ -387,7 +395,7 @@ final class VaultStore: ObservableObject {
         notes = Self.sortedNotes(notes, lastOpened: lastOpenedAt)
     }
 
-    /// Moves a note to `.stickies-trash/` (kept 30 days). The next sync moves the Mac's copy
+    /// Moves a note to the `Stickies Trash` folder (kept 30 days). The next sync moves the Mac's copy
     /// to the Trash, unless the Mac edited it meanwhile.
     func moveNoteToTrash(_ note: Note) {
         guard let writer, let hash = NoteWriter.currentHash(of: note.path) else {

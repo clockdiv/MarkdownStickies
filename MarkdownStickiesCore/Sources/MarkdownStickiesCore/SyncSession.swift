@@ -442,11 +442,14 @@ public enum IOSSyncResponder {
         public var deviceID: UUID
         public var deviceName: String
         public var vault: URL
+        /// App-owned folder for the vault info (see `VaultScanner.infoURL`).
+        public var storage: URL
 
-        public init(deviceID: UUID, deviceName: String, vault: URL) {
+        public init(deviceID: UUID, deviceName: String, vault: URL, storage: URL) {
             self.deviceID = deviceID
             self.deviceName = deviceName
             self.vault = vault.standardizedFileURL
+            self.storage = storage
         }
     }
 
@@ -476,7 +479,8 @@ public enum IOSSyncResponder {
         var peerName = "the Mac"
         do {
             let vault = configuration.vault
-            var info = try VaultScanner.loadOrCreateInfo(vault: vault)
+            let storage = configuration.storage
+            var info = try VaultScanner.loadOrCreateInfo(vault: vault, storage: storage)
             hooks.progress(.preparing)
 
             try await connection.send(.hello(SyncHello(
@@ -505,7 +509,7 @@ public enum IOSSyncResponder {
                 throw SessionAbort(message: message)
             }
             info.macDeviceID = prepare.macDeviceID
-            try VaultScanner.saveInfo(info, vault: vault)
+            try VaultScanner.saveInfo(info, vault: vault, storage: storage)
 
             await hooks.saveOpenEditors()
             let knownImages = Set(prepare.knownImages)

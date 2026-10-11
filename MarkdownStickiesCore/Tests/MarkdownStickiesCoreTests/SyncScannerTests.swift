@@ -141,9 +141,13 @@ final class VaultScannerTests: XCTestCase {
     private func loc(_ path: String) -> NoteLocation { NoteLocation(rootID: rootID, path: path) }
 
     func testInfoIsCreatedOnceAndPersisted() throws {
-        let first = try VaultScanner.loadOrCreateInfo(vault: vault)
-        let second = try VaultScanner.loadOrCreateInfo(vault: vault)
+        let storage = vault.appendingPathComponent("../\(UUID().uuidString)-storage").standardizedFileURL
+        defer { try? FileManager.default.removeItem(at: storage) }
+        let first = try VaultScanner.loadOrCreateInfo(vault: vault, storage: storage)
+        let second = try VaultScanner.loadOrCreateInfo(vault: vault, storage: storage)
         XCTAssertEqual(first, second)
+        let names = try FileManager.default.contentsOfDirectory(atPath: vault.path)
+        XCTAssertFalse(names.contains { $0.hasPrefix(".") }, "nothing hidden is written into the vault")
     }
 
     func testScanRootFoldersAndInbox() throws {
@@ -152,7 +156,7 @@ final class VaultScannerTests: XCTestCase {
         try put("# untracked\n", at: file("Project/plain.md"))
         try put("# untracked inbox\n", at: file("loose.md"))
         try put(tracked(UUID()), at: file("Elsewhere/x.md"))
-        try put(tracked(UUID()), at: file(".stickies-trash/2026-10-01/Project/old.md"))
+        try put(tracked(UUID()), at: file("Stickies Trash/2026-10-01/Project/old.md"))
 
         let manifest = try VaultScanner.scan(vault: vault, info: info)
         XCTAssertEqual(Set(manifest.notes.map(\.location)), [loc("docs/idea.md"), .inbox("2026-10-11-new.md")])

@@ -65,7 +65,9 @@ public final class NoteWriter: @unchecked Sendable {
 
         let fm = FileManager.default
         let directory = url.deletingLastPathComponent()
-        let temp = directory.appendingPathComponent(".\(url.lastPathComponent).stickies-tmp-\(Self.shortToken())")
+        // Visible name: "On My iPhone" folders refuse names starting with a dot. Scanners skip it
+        // because it doesn't end in `.md`, and it only exists for the moment of the write.
+        let temp = directory.appendingPathComponent("\(url.lastPathComponent).stickies-tmp-\(Self.shortToken())")
         do {
             try fm.createDirectory(at: directory, withIntermediateDirectories: true)
             try data.write(to: temp)

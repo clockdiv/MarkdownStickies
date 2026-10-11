@@ -20,10 +20,13 @@ public struct SystemTrash: TrashBin {
     }
 }
 
-/// `.stickies-trash/<yyyy-mm-dd>/<path inside the vault>` on iOS. Serves as trash and as the
+/// `Stickies Trash/<yyyy-mm-dd>/<path inside the vault>` on iOS. Serves as trash and as the
 /// place for copies of overwritten files. Kept 30 days (`purge`).
+///
+/// The folder is visible on purpose: iOS "On My iPhone" folders refuse names starting with a dot,
+/// and a visible folder lets you restore notes in the Files app. It's never synced or listed.
 public struct FolderTrash: TrashBin, OverwriteBackup {
-    public static let folderName = ".stickies-trash"
+    public static let folderName = "Stickies Trash"
     public static let retentionDays = 30
 
     public let vault: URL

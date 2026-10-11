@@ -40,7 +40,7 @@ public enum PathRules {
     /// Checks a relative path and returns it normalized.
     ///
     /// Rejects absolute paths, empty, `.` and `..` components, hidden components
-    /// (anything starting with `.`, which covers `.stickies-trash`), NUL characters,
+    /// (anything starting with `.`), NUL characters,
     /// components over 255 bytes, and the wrong file type for `kind`.
     public static func validate(_ path: String, as kind: Kind) -> Result<String, Violation> {
         let path = normalized(path)

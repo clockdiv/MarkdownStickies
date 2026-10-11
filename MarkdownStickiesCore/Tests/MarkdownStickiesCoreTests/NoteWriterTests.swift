@@ -38,7 +38,7 @@ final class NoteWriterTests: XCTestCase {
     }
 
     private func trashed(_ path: String) -> String? {
-        read(".stickies-trash/2026-10-11/\(path)")
+        read("Stickies Trash/2026-10-11/\(path)")
     }
 
     private func assertFails(
@@ -110,11 +110,14 @@ final class NoteWriterTests: XCTestCase {
         XCTAssertFalse(editors.hasUnsavedEdits(url("idea.md")))
     }
 
-    func testNoTempFilesAreLeftBehind() async throws {
+    func testNoTempFilesAreLeftBehindAndNothingHiddenIsCreated() async throws {
         let hash = try put("old", "idea.md")
         try writer.write(Data("new".utf8), to: url("idea.md"), expect: .hash(hash), origin: .sync)
+        try writer.write(Data("x".utf8), to: url("new.md"), expect: .absent, origin: .sync)
+        try writer.trash(url("new.md"), expectHash: NoteHashing.fileHash(Data("x".utf8)), origin: .sync)
         let names = try FileManager.default.contentsOfDirectory(atPath: vault.path)
         XCTAssertFalse(names.contains { $0.contains("stickies-tmp") })
+        XCTAssertFalse(names.contains { $0.hasPrefix(".") })
     }
 
     // MARK: - move
@@ -241,6 +244,11 @@ final class SyncStateStoreTests: XCTestCase {
         store.pruneConflictBases(keeping: [])
         XCTAssertNil(store.conflictBase(for: copy))
         XCTAssertEqual(store.baseText(for: original), Data("base".utf8))
+    }
+
+    func testTrashFolderNameIsNeverGivenToARoot() {
+        let records = RootRecord.assign(existing: [], synced: [(UUID(), "/Users/me/Stickies Trash")])
+        XCTAssertEqual(records.map(\.iosFolderName), ["Stickies Trash (2)"])
     }
 
     func testRootNamesAreStableAndNeverReused() {

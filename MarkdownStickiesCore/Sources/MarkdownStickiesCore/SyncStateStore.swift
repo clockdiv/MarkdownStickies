@@ -138,6 +138,7 @@ public struct RootRecord: Codable, Hashable, Sendable {
             return record
         }
         var used = Set(records.map { PathRules.collisionKey($0.iosFolderName) })
+        used.formUnion(VaultScanner.reservedFolderNames.map(PathRules.collisionKey))
 
         for root in synced where !records.contains(where: { $0.rootID == root.rootID }) {
             let base = folderName(for: root.macPath)
