@@ -126,7 +126,7 @@ final class NoteStateStore: ObservableObject {
         }
     }
 
-    /// Clear recents ranking + color; keep a burial marker so sort puts the note at the bottom.
+    /// Clear the recents ranking; keep a burial marker so sort puts the note at the bottom.
     func markRemovedFromRecents(_ path: URL, at date: Date = Date()) {
         update(path) {
             $0.lastOpenedAt = nil

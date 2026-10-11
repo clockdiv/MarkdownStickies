@@ -193,16 +193,9 @@ struct ControlWindowView: View {
                 let activePath = store.windowManager.activePath
                 List(store.filteredNotes) { note in
                     let isOpen = openPaths.contains(note.path.path)
-                    let state = store.stateStore.storedState(for: note.path)
-                    // Color only for open / recently opened — not after Remove from Recents.
+                    // The note's own `stickies-color` is the only source; notes never opened have none.
                     let fileColor = store.noteColors[note.path.path]
-                    let noteColor: NoteColor? = {
-                        if isOpen { return fileColor ?? .default }
-                        guard let state, state.lastOpenedAt != nil, state.removedFromRecentsAt == nil else {
-                            return nil
-                        }
-                        return fileColor
-                    }()
+                    let noteColor: NoteColor? = isOpen ? (fileColor ?? .default) : fileColor
                     NoteListRow(
                         note: note,
                         isOpen: isOpen,
@@ -889,13 +882,11 @@ private struct NoteListRow: View {
         let shape = RoundedRectangle(cornerRadius: 2.5, style: .continuous)
         if let noteColor {
             let swatch = Color(nsColor: noteColor.listSwatchNSColor)
-            if isOpen {
-                shape.fill(swatch)
-                    .help("Open")
-            } else {
-                shape.strokeBorder(swatch, lineWidth: 1.75)
-                    .help("Saved color")
-            }
+            shape.fill(swatch)
+                .overlay {
+                    if isOpen { shape.strokeBorder(Color.primary.opacity(0.55), lineWidth: 1.5) }
+                }
+                .help(isOpen ? "Open" : "Color")
         } else {
             Color.clear
         }

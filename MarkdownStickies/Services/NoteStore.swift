@@ -370,7 +370,7 @@ final class NoteStore: ObservableObject {
         return state.removedFromRecentsAt == nil && state.lastOpenedAt != nil
     }
 
-    /// Drop last-opened ranking and color; bury at the bottom of the list until opened again.
+    /// Drop the last-opened ranking; bury at the bottom of the list until opened again. The color stays (it lives in the note).
     /// Closes the sticky first if it’s currently open.
     func removeFromRecents(_ note: Note) {
         let path = note.path
