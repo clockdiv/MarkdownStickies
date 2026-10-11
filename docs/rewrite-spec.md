@@ -142,7 +142,7 @@ User-facing strings never say "peer". They use the device's name.
 ```yaml
 ---
 stickies-id: 3F2A9C1E-7B4D-4E0A-9C55-1D2E3F4A5B6C
-stickies-color: blue                                   # optional; absent = default (yellow)
+stickies-color: blue                                   # written for every opened note, yellow included
 stickies-conflict-of: 9A8B7C6D-...                     # only on conflict copies
 created_on: MacBook Pro                                # existing key, kept unchanged
 ---
@@ -178,7 +178,7 @@ Anything else, such as a note starting with blank lines or with a horizontal rul
 | Scanning, search, sync | **no**, never (the only exception is the duplicate fix-up, §2.3) |
 | HTML→Markdown "Apply" | only if the note is open, which means it already has one |
 
-On the **first open**, the same write also adds `stickies-color` if the note has a non-default color (preset or custom) in the Mac's local window state. This moves color from local state into the file.
+On the **first open**, the same write also adds `stickies-color` if it is missing: the color the Mac kept in its local window state before this change, otherwise yellow. Yellow is written explicitly. After that the frontmatter is the **only** place a color is stored; the Mac's `note-state.json` no longer holds colors (decided 2026-10-11).
 
 **If the file can't be read or written** (not valid UTF-8, read-only, no permission), the note opens **read-only** with a notice. Nothing is written, so the note stays untracked. This replaces today's catch branch, which overwrites the file with a template.
 
@@ -897,3 +897,8 @@ References are to `docs/rewrite-spec-review.md`.
 - New "Scope" subsection in §0: Core v1 contents, the fallback rule ("skipped and reported, never guessed"), and the table of later cases with their v1 behavior.
 - **Later** markers in §2.3, §2.7, §3.3, §3.5 and §4.2.
 - §10 rewritten as the Core v1 order of work on the branch `sync-rewrite`. The stopgaps are removed because the old apps aren't used for syncing in the meantime.
+
+### Revision 3.1 (2026-10-11): color has one source
+
+- `stickies-color` is written for every opened note, yellow included (no "absent = default" shortcut).
+- The Mac no longer stores colors in `note-state.json`; an old stored color is moved into the note on its next open and then dropped. The note list reads colors from the files (cached with the ids).

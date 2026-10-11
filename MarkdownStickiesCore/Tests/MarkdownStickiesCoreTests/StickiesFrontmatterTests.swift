@@ -134,10 +134,10 @@ final class StickiesFrontmatterTests: XCTestCase {
         XCTAssertEqual(second.data, first.data)
     }
 
-    func testDefaultColorRemovesKey() {
+    func testDefaultColorIsWrittenExplicitly() {
         let doc = data("---\nstickies-id: \(id.uuidString)\nstickies-color: blue\n---\n# Note\n")
         let result = StickiesFrontmatter.settingColor(.default, in: doc)
-        XCTAssertEqual(text(result), "---\nstickies-id: \(id.uuidString)\n---\n# Note\n")
+        XCTAssertEqual(text(result), "---\nstickies-id: \(id.uuidString)\nstickies-color: yellow\n---\n# Note\n")
     }
 
     func testRemovingLastFieldRemovesWholeBlock() {

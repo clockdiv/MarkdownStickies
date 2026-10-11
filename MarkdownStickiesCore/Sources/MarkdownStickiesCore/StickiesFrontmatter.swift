@@ -101,12 +101,9 @@ public enum StickiesFrontmatter {
         return (updated, newID, true)
     }
 
-    /// Sets the color. The default color removes the key, so default notes carry no extra line.
+    /// Sets the color. Written explicitly for every color, yellow included.
     public static func settingColor(_ color: NoteColor, in data: Data) -> Data {
-        if color == .default {
-            return removing(colorKey, in: data)
-        }
-        return setting(colorKey, to: color.frontmatterValue, in: data)
+        setting(colorKey, to: color.frontmatterValue, in: data)
     }
 
     // MARK: - Block parsing (internal for NoteHashing and tests)

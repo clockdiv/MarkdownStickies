@@ -2,7 +2,9 @@ import Foundation
 
 struct NoteWindowState: Codable, Equatable, Sendable {
     var frame: CGRectCodable
-    var color: NoteColor
+    /// Color from before it moved into the note's frontmatter (`stickies-color`). Read once,
+    /// written into the note on its next open, then cleared. Never set otherwise.
+    var legacyColor: NoteColor?
     /// Legacy field — open stickies are tracked per set in `NoteStateFile.setOpenPaths`.
     var isOpen: Bool
     var floatOnTop: Bool
@@ -29,10 +31,9 @@ struct NoteWindowState: Codable, Equatable, Sendable {
     static let minSetIndex: Int = 0
     static let maxSetIndex: Int = 9
 
-    static func `default`(color: NoteColor = .default) -> NoteWindowState {
+    static func `default`() -> NoteWindowState {
         NoteWindowState(
             frame: CGRectCodable(x: 120, y: 120, width: 280, height: 280),
-            color: color,
             isOpen: false,
             floatOnTop: false,
             textSize: defaultTextSize,
@@ -44,12 +45,13 @@ struct NoteWindowState: Codable, Equatable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case frame, color, isOpen, floatOnTop, textSize, columnCount, lastOpenedAt, removedFromRecentsAt, setIndex
+        case frame, isOpen, floatOnTop, textSize, columnCount, lastOpenedAt, removedFromRecentsAt, setIndex
+        case legacyColor = "color"
     }
 
     init(
         frame: CGRectCodable,
-        color: NoteColor,
+        legacyColor: NoteColor? = nil,
         isOpen: Bool,
         floatOnTop: Bool,
         textSize: Double = Self.defaultTextSize,
@@ -59,7 +61,7 @@ struct NoteWindowState: Codable, Equatable, Sendable {
         setIndex: Int = 0
     ) {
         self.frame = frame
-        self.color = color
+        self.legacyColor = legacyColor
         self.isOpen = isOpen
         self.floatOnTop = floatOnTop
         self.textSize = textSize
@@ -73,12 +75,12 @@ struct NoteWindowState: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         frame = try c.decode(CGRectCodable.self, forKey: .frame)
         // Backward compatible: old files stored StickyColor names as strings.
-        if let noteColor = try? c.decode(NoteColor.self, forKey: .color) {
-            color = noteColor
-        } else if let legacy = try? c.decode(StickyColor.self, forKey: .color) {
-            color = .preset(legacy)
+        if let noteColor = try? c.decode(NoteColor.self, forKey: .legacyColor) {
+            legacyColor = noteColor
+        } else if let legacy = try? c.decode(StickyColor.self, forKey: .legacyColor) {
+            legacyColor = .preset(legacy)
         } else {
-            color = .default
+            legacyColor = nil
         }
         isOpen = try c.decode(Bool.self, forKey: .isOpen)
         floatOnTop = try c.decode(Bool.self, forKey: .floatOnTop)

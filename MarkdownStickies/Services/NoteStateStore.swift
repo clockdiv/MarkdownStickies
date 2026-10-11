@@ -131,7 +131,6 @@ final class NoteStateStore: ObservableObject {
         update(path) {
             $0.lastOpenedAt = nil
             $0.removedFromRecentsAt = date
-            $0.color = .default
             $0.floatOnTop = false
             $0.isOpen = false
         }
@@ -148,8 +147,10 @@ final class NoteStateStore: ObservableObject {
         update(path) { $0.frame = CGRectCodable(frame) }
     }
 
-    func setColor(_ path: URL, color: NoteColor) {
-        update(path) { $0.color = color }
+    /// The color now lives in the note's frontmatter.
+    func clearLegacyColor(_ path: URL) {
+        guard storedState(for: path)?.legacyColor != nil else { return }
+        update(path) { $0.legacyColor = nil }
     }
 
     func setTextSize(_ path: URL, size: Double) {

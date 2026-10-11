@@ -65,6 +65,7 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
         content initialText: String,
         loadedHash: String,
         isReadOnly: Bool,
+        color: NoteColor,
         state: NoteWindowState,
         manager: StickyWindowManager
     ) {
@@ -72,7 +73,7 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
         self.isReadOnly = isReadOnly
         self.notePath = note.path
         self.manager = manager
-        self.currentColor = state.color
+        self.currentColor = color
         self.floatOnTop = state.floatOnTop
         self.noteTitle = note.title
         self.textSize = state.textSize
@@ -82,7 +83,7 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
         self.showFrontmatter = false
         self.draftText = initialText
 
-        let bg = state.color.nsColor
+        let bg = color.nsColor
         let panel = StickyPanel(
             contentRect: state.frame.cgRect,
             // Borderless → no system traffic lights. Custom title bar below.
@@ -846,6 +847,10 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
         presentDocument(text)
         suppressExternalReload = false
         loadedHash = hash
+        if let fileColor = StickiesFrontmatter.color(in: Data(text.utf8)).map(NoteColor.init(frontmatter:)),
+           fileColor != currentColor {
+            applyColorVisuals(fileColor)
+        }
     }
 
     /// Soft refresh so newly synced images appear without changing text.
@@ -892,6 +897,11 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
     }
 
     private func handleColorChange(_ color: NoteColor) {
+        applyColorVisuals(color)
+        writeColorToFrontmatter(color)
+    }
+
+    private func applyColorVisuals(_ color: NoteColor) {
         currentColor = color
         let ns = color.nsColor
         panel.backgroundColor = ns
@@ -900,7 +910,6 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
         content.applyBackground(ns)
         manager?.noteColorChanged(path: notePath, color: color)
         syncColorMenu()
-        writeColorToFrontmatter(color)
     }
 
     /// Color lives in the note's frontmatter (`stickies-color`) so it syncs. The default color

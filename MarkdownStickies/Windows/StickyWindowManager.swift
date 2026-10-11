@@ -60,13 +60,13 @@ final class StickyWindowManager: ObservableObject {
         }
 
         // Open stickies are remembered on the active set’s layout (not note ownership).
-        var state = stateStore.state(for: note.path)
-        if let color = prepared.color { state.color = color }
+        let state = stateStore.state(for: note.path)
         let controller = StickyWindowController(
             note: note,
             content: prepared.text,
             loadedHash: prepared.hash,
             isReadOnly: prepared.notice != nil,
+            color: prepared.color,
             state: state,
             manager: self
         )
@@ -74,7 +74,7 @@ final class StickyWindowManager: ObservableObject {
         openPaths.insert(note.path.path)
         stateStore.setOpen(note.path, isOpen: true)
         stateStore.touchLastOpened(note.path)
-        if let color = prepared.color { stateStore.setColor(note.path, color: color) }
+        noteStore?.noteColorChanged(path: note.path, color: prepared.color)
         if makeKey {
             controller.show()
         } else {
@@ -94,44 +94,55 @@ final class StickyWindowManager: ObservableObject {
     private struct Prepared {
         var text: String
         var hash: String
-        var color: NoteColor?
+        var color: NoteColor
         /// Set when the note opens read-only.
         var notice: String?
     }
 
-    /// Opening "touches" the note (spec §2.2): adds `stickies-id` once, and moves a non-default
-    /// local color into `stickies-color`. Never writes anything else; a file that can't be read
-    /// as UTF-8 or can't be written opens read-only instead.
+    /// Opening "touches" the note (spec §2.2): adds `stickies-id` once, and `stickies-color` if
+    /// missing (the color from before it moved into notes, otherwise yellow). The frontmatter is
+    /// the only place a color is kept. Never writes anything else; a file that can't be read as
+    /// UTF-8 or can't be written opens read-only instead.
     private func prepareForOpening(_ path: URL) -> Prepared? {
         guard let data = try? Data(contentsOf: path) else { return nil }
         let hash = NoteHashing.fileHash(data)
+        let legacy = stateStore.storedState(for: path)?.legacyColor
         guard let text = String(data: data, encoding: .utf8) else {
             return Prepared(
                 text: String(decoding: data, as: UTF8.self),
                 hash: hash,
+                color: legacy ?? .default,
                 notice: "This file isn’t UTF-8 text. It’s shown read-only and doesn’t sync."
             )
         }
 
         var updated = StickiesFrontmatter.ensuringID(in: data).data
-        let fileColor = StickiesFrontmatter.color(in: updated).map(NoteColor.init(frontmatter:))
-        if StickiesFrontmatter.value(for: StickiesFrontmatter.colorKey, in: updated) == nil,
-           let local = stateStore.storedState(for: path)?.color, local != .default {
-            updated = StickiesFrontmatter.settingColor(local.frontmatter, in: updated)
+        let color: NoteColor
+        if let fileColor = StickiesFrontmatter.color(in: updated) {
+            color = NoteColor(frontmatter: fileColor)
+        } else {
+            color = legacy ?? .default
+            if StickiesFrontmatter.value(for: StickiesFrontmatter.colorKey, in: updated) == nil {
+                updated = StickiesFrontmatter.settingColor(color.frontmatter, in: updated)
+            }
         }
-        guard updated != data else { return Prepared(text: text, hash: hash, color: fileColor) }
+        guard updated != data else {
+            stateStore.clearLegacyColor(path)
+            return Prepared(text: text, hash: hash, color: color)
+        }
 
         do {
             let newHash = try writer?.write(updated, to: path, expect: .hash(hash), origin: .app) ?? hash
             noteStore?.idIndex.invalidate(path)
             noteStore?.noteFileDidSave(path: path, modifiedAt: Date())
             stateStore.migrateLegacyKeys(for: [path])
-            return Prepared(text: String(decoding: updated, as: UTF8.self), hash: newHash, color: fileColor)
+            stateStore.clearLegacyColor(path)
+            return Prepared(text: String(decoding: updated, as: UTF8.self), hash: newHash, color: color)
         } catch {
             return Prepared(
                 text: text,
                 hash: hash,
-                color: fileColor,
+                color: color,
                 notice: "Markdown Stickies can’t write to this file. It’s shown read-only and doesn’t sync."
             )
         }
@@ -318,7 +329,7 @@ final class StickyWindowManager: ObservableObject {
     }
 
     func noteColorChanged(path: URL, color: NoteColor) {
-        stateStore.setColor(path, color: color)
+        noteStore?.noteColorChanged(path: path, color: color)
     }
 
     func noteTextSizeChanged(path: URL, size: Double) {

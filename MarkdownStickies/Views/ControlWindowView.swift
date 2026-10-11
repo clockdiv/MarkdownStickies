@@ -195,20 +195,20 @@ struct ControlWindowView: View {
                     let isOpen = openPaths.contains(note.path.path)
                     let state = store.stateStore.storedState(for: note.path)
                     // Color only for open / recently opened — not after Remove from Recents.
+                    let fileColor = store.noteColors[note.path.path]
                     let noteColor: NoteColor? = {
-                        guard let state else { return nil }
-                        if isOpen { return state.color }
-                        guard state.lastOpenedAt != nil, state.removedFromRecentsAt == nil else {
+                        if isOpen { return fileColor ?? .default }
+                        guard let state, state.lastOpenedAt != nil, state.removedFromRecentsAt == nil else {
                             return nil
                         }
-                        return state.color
+                        return fileColor
                     }()
                     NoteListRow(
                         note: note,
                         isOpen: isOpen,
                         isActive: activePath == note.path.path,
                         noteColor: noteColor,
-                        previewColor: state?.color ?? .default,
+                        previewColor: fileColor ?? .default,
                         onOpen: { store.openNote(note) }
                     )
                     .contextMenu {

@@ -241,7 +241,14 @@ final class NoteStore: ObservableObject {
     @Published var mergeRequest: MergeRequest?
     /// Filled at each rescan: paths of conflict copies, and ids that have a conflict copy.
     @Published private(set) var conflictCopyPaths: Set<String> = []
+    /// `stickies-color` per note path, read from the files (the frontmatter is the only source).
+    @Published private(set) var noteColors: [String: NoteColor] = [:]
     @Published private(set) var idsWithConflictCopies: Set<UUID> = []
+
+    /// A sticky changed its color (the file is saved shortly after); show it in the list now.
+    func noteColorChanged(path: URL, color: NoteColor) {
+        noteColors[path.path] = color
+    }
 
     func isConflictCopy(_ note: Note) -> Bool {
         conflictCopyPaths.contains(note.path.path)
@@ -422,12 +429,16 @@ final class NoteStore: ObservableObject {
         stateStore.migrateLegacyKeys(for: scanned.map(\.path))
         var copies = Set<String>()
         var originals = Set<UUID>()
+        var colors: [String: NoteColor] = [:]
         for note in scanned {
-            if let original = idIndex.entry(for: note.path).conflictOf {
+            let entry = idIndex.entry(for: note.path)
+            if let original = entry.conflictOf {
                 copies.insert(note.path.path)
                 originals.insert(original)
             }
+            if let color = entry.color { colors[note.path.path] = NoteColor(frontmatter: color) }
         }
+        noteColors = colors
         conflictCopyPaths = copies
         idsWithConflictCopies = originals
         sortNotes()
