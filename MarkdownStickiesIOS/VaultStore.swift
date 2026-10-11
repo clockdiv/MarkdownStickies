@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import MarkdownStickiesCore
 import SwiftUI
@@ -5,7 +6,25 @@ import SwiftUI
 import UIKit
 #endif
 
-/// Persists a security-scoped bookmark for a user-picked notes folder.
+/// A file that a sync wrote, moved or trashed, for open editors.
+enum SyncFileChange {
+    case written(URL)
+    case moved(from: URL, to: URL)
+    case trashed(URL)
+}
+
+/// How a note in the list relates to sync.
+enum NoteSyncStatus {
+    /// In a root folder, tracked.
+    case synced
+    /// Top level of the vault: placed into a folder at the next sync.
+    case inbox
+    case conflictCopy
+    /// No `stickies-id` yet, or outside the root folders.
+    case notSynced
+}
+
+/// The user-picked notes folder ("vault") and the sync with the Mac.
 @MainActor
 final class VaultStore: ObservableObject {
     @Published private(set) var rootURL: URL?
@@ -13,23 +32,31 @@ final class VaultStore: ObservableObject {
     @Published var filterText = ""
     @Published var lastError: String?
     @Published var isScanning = false
-    /// Shown in `created_on` and LAN hello — editable in Settings.
+    /// Shown when the chosen folder is in iCloud Drive or another cloud location.
+    @Published private(set) var folderWarning: String?
+    /// Shown in `created_on` and to the Mac — editable in Settings.
     @Published var deviceDisplayName: String {
         didSet {
             let trimmed = deviceDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return }
             UserDefaults.standard.set(trimmed, forKey: Self.deviceNameKey)
-            syncService.updateDeviceName(trimmed)
+            sync.updateDeviceName(trimmed)
         }
     }
-    /// Paths written from the peer on the last sync.
-    @Published private(set) var syncInboundPaths: Set<String> = []
-    /// Paths we sent that the peer has not confirmed yet.
-    @Published private(set) var syncOutboundPaths: Set<String> = []
-    /// Centered sync result banner (stays until dismissed or next sync).
-    @Published var syncBanner: SyncFeedback?
 
-    let syncService: LanSyncService
+    let sync: SyncService
+    /// Which notes have unsaved edits (sync never touches those).
+    let editors = EditorRegistry()
+    /// `stickies-id`, color and conflict marker per file.
+    let idIndex = NoteIDIndex()
+    /// Every note write goes through this writer (set while a folder is chosen).
+    private(set) var writer: NoteWriter?
+    /// Files a sync changed, for open editors.
+    let fileChanges = PassthroughSubject<SyncFileChange, Never>()
+
+    private var vaultInfo: VaultInfo?
+    private var editorSavers: [UUID: () -> Void] = [:]
+    private var cancellables = Set<AnyCancellable>()
 
     private let bookmarkKey = "vaultFolderBookmark"
     private static let deviceNameKey = "deviceDisplayName"
@@ -66,11 +93,19 @@ final class VaultStore: ObservableObject {
 
     init() {
         let resolved = Self.resolveDeviceDisplayName()
-        let syncService = LanSyncService(deviceName: resolved)
-        self.syncService = syncService
+        weak var weakSelf: VaultStore?
+        self.sync = SyncService(deviceName: resolved, platform: .ios) { connection, progress in
+            guard let store = await MainActor.run(body: { weakSelf }) else { return .failed("The app is closing.") }
+            return await store.runSyncSession(connection, progress: progress)
+        }
         self.deviceDisplayName = resolved
         lastOpenedAt = Self.loadLastOpened()
-        configureSync()
+        weakSelf = self
+        sync.onFinished = { [weak self] _ in self?.rescan() }
+        sync.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
         // Do not restore/scan/advertise here — that blocked launch on the main thread.
     }
 
@@ -121,47 +156,112 @@ final class VaultStore: ObservableObject {
         return host
     }
 
-    private func configureSync() {
-        syncService.catalogProvider = { [weak self] in
-            guard let self, let root = self.rootURL else { return [] }
-            return SyncCatalogBuilder.catalog(roots: [root], config: ScanConfig.load())
-        }
-        syncService.syncRootsProvider = { [weak self] in
-            guard let root = self?.rootURL else { return [] }
-            return [root]
-        }
-        syncService.onApplyRemoteCatalog = { [weak self] remote, peerLabel in
-            self?.applyRemoteCatalog(remote, peerLabel: peerLabel) ?? .empty
-        }
-        syncService.onExchangeFinished = { [weak self] result, role in
-            self?.presentSyncResult(result, role: role)
-        }
-        syncService.onProgress = { [weak self] feedback in
-            self?.syncBanner = feedback
-        }
-        syncService.onRemoteBannerDismiss = { [weak self] in
-            self?.syncBanner = nil
-        }
-        syncService.onRemoteMergeCancel = { [weak self] in
-            self?.syncBanner = nil
-        }
-    }
+    // MARK: - Sync
 
-    private func refreshSyncAdvertising() {
-        if rootURL == nil {
-            syncService.stopAdvertising()
+    func syncNow() {
+        guard rootURL != nil else {
+            lastError = "Choose a notes folder before syncing."
             return
         }
-        // iOS must stay discoverable so Mac→iOS sync can find this device.
-        syncService.requestLocalNetworkAuthorization()
-        syncService.startAdvertising()
+        lastError = nil
+        sync.syncNow()
+    }
+
+    func cancelSync() {
+        sync.cancel()
+    }
+
+    func dismissSyncResult() {
+        sync.dismissResult()
     }
 
     /// Call when the app returns to the foreground — Bonjour often goes stale after sleep.
     func ensureDiscoverable() {
         guard rootURL != nil else { return }
-        syncService.ensureAdvertisingFresh()
+        sync.refreshAdvertising()
     }
+
+    private func refreshSyncAdvertising() {
+        if rootURL == nil {
+            sync.stopAdvertising()
+        } else {
+            // iOS must stay discoverable so the Mac can start a sync.
+            sync.startAdvertising()
+        }
+    }
+
+    /// The iOS side of one session: report the vault, carry out the Mac's steps.
+    private func runSyncSession(
+        _ connection: SyncConnection,
+        progress: @escaping @Sendable (SyncProgress) -> Void
+    ) async -> SyncOutcome {
+        guard let root = rootURL, let writer else {
+            connection.close()
+            return .failed("Choose a notes folder on \(deviceDisplayName) first.")
+        }
+        #if canImport(UIKit)
+        let background = UIApplication.shared.beginBackgroundTask(withName: "Sync")
+        defer { UIApplication.shared.endBackgroundTask(background) }
+        #endif
+        let configuration = IOSSyncResponder.Configuration(
+            deviceID: sync.deviceID,
+            deviceName: deviceDisplayName,
+            vault: root
+        )
+        let hooks = IOSSyncResponder.Hooks(
+            saveOpenEditors: { [weak self] in await self?.saveOpenEditors() },
+            stepApplied: { [weak self] action in await self?.publishChange(action) },
+            progress: progress
+        )
+        let outcome = await IOSSyncResponder.run(connection: connection, configuration: configuration, writer: writer, hooks: hooks)
+        vaultInfo = try? VaultScanner.loadOrCreateInfo(vault: root)
+        return outcome
+    }
+
+    private func publishChange(_ action: SyncAction) {
+        guard let root = rootURL, let info = try? VaultScanner.loadOrCreateInfo(vault: root) else { return }
+        func url(_ location: NoteLocation) -> URL? {
+            VaultScanner.url(for: location, vault: root, info: info)?.standardizedFileURL
+        }
+        switch action {
+        case .writeNote(_, let at, _, _):
+            if let url = url(at) {
+                idIndex.invalidate(url)
+                fileChanges.send(.written(url))
+            }
+        case .moveNote(_, let from, let to, _):
+            if let source = url(from), let target = url(to) {
+                idIndex.invalidate(source)
+                fileChanges.send(.moved(from: source, to: target))
+            }
+        case .trashNote(_, let at, _):
+            if let url = url(at) { fileChanges.send(.trashed(url)) }
+        default:
+            break
+        }
+    }
+
+    // MARK: - Editors
+
+    /// Open editors register a save function, so a sync can save them first.
+    func registerEditor(_ id: UUID, save: @escaping () -> Void) {
+        editorSavers[id] = save
+    }
+
+    func unregisterEditor(_ id: UUID) {
+        editorSavers[id] = nil
+    }
+
+    private func saveOpenEditors() {
+        for save in editorSavers.values { save() }
+    }
+
+    /// The app wrote a file itself (editor save, new note).
+    func noteWritten(_ url: URL) {
+        idIndex.invalidate(url)
+    }
+
+    // MARK: - Folder
 
     func stopAccessingIfNeeded() {
         if isAccessing, let url = rootURL {
@@ -178,11 +278,12 @@ final class VaultStore: ObservableObject {
             lastError = "Could not access the selected folder."
             rootURL = nil
             notes = []
+            writer = nil
             refreshSyncAdvertising()
             return
         }
         isAccessing = true
-        rootURL = url.standardizedFileURL
+        activate(url.standardizedFileURL)
 
         do {
             let data = try url.bookmarkData(
@@ -194,16 +295,29 @@ final class VaultStore: ObservableObject {
         } catch {
             lastError = "Could not save folder access: \(error.localizedDescription)"
         }
-
-        rescan()
-        refreshSyncAdvertising()
     }
 
     func clearFolder() {
         stopAccessingIfNeeded()
         rootURL = nil
         notes = []
+        writer = nil
+        vaultInfo = nil
         UserDefaults.standard.removeObject(forKey: bookmarkKey)
+        refreshSyncAdvertising()
+    }
+
+    private func activate(_ root: URL) {
+        rootURL = root
+        let trash = FolderTrash(vault: root)
+        writer = NoteWriter(trash: trash, backup: trash, editors: editors)
+        trash.purge()
+        vaultInfo = try? VaultScanner.loadOrCreateInfo(vault: root)
+        let isCloud = (try? root.resourceValues(forKeys: [.isUbiquitousItemKey]))?.isUbiquitousItem == true
+        folderWarning = isCloud
+            ? "This folder is in iCloud Drive. Files iCloud removed from this device are skipped during syncs. A folder “On My iPhone” works best."
+            : nil
+        rescan()
         refreshSyncAdvertising()
     }
 
@@ -216,18 +330,52 @@ final class VaultStore: ObservableObject {
         isScanning = true
         let scanRoot = root
         Task.detached(priority: .userInitiated) {
-            let scanned = NoteScanner.scan(roots: [scanRoot], config: ScanConfig.load())
-                .filter { !NoteFrontmatter.isTrashed(file: $0.path) }
+            let scanned = NoteScanner.scan(roots: [scanRoot], config: .empty)
             await MainActor.run {
                 // Ignore stale results if the folder changed mid-scan.
                 guard self.rootURL?.standardizedFileURL == scanRoot.standardizedFileURL else { return }
-                self.notes = Self.sortedNotes(
-                    scanned,
-                    inbound: self.syncInboundPaths,
-                    lastOpened: self.lastOpenedAt
-                )
+                self.vaultInfo = try? VaultScanner.loadOrCreateInfo(vault: scanRoot)
+                self.notes = Self.sortedNotes(scanned, lastOpened: self.lastOpenedAt)
                 self.isScanning = false
             }
+        }
+    }
+
+    // MARK: - Notes
+
+    func status(of note: Note) -> NoteSyncStatus {
+        guard let root = rootURL else { return .notSynced }
+        let entry = idIndex.entry(for: note.path)
+        let rootPath = root.standardizedFileURL.path + "/"
+        let path = note.path.standardizedFileURL.path
+        guard path.hasPrefix(rootPath), entry.id != nil else { return .notSynced }
+        let components = path.dropFirst(rootPath.count).split(separator: "/")
+        if components.count == 1 { return .inbox }
+        let folders = Set(vaultInfo?.roots.map(\.folderName) ?? [])
+        guard let first = components.first, folders.contains(String(first)) else { return .notSynced }
+        return entry.conflictOf != nil ? .conflictCopy : .synced
+    }
+
+    func color(of note: Note) -> MarkdownStickiesCore.NoteColor? {
+        idIndex.entry(for: note.path).color
+    }
+
+    /// New notes go to the top level of the vault (the Inbox); the next sync places them.
+    func createNote(title: String) -> Note? {
+        guard let root = rootURL, let writer else { return nil }
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effective = trimmed.isEmpty ? "Untitled" : trimmed
+        let url = NoteFilename.uniqueURL(in: root, date: Date(), title: effective)
+        let initial = NoteFrontmatter.initialDocument(title: effective, createdOn: deviceDisplayName)
+        do {
+            try writer.write(Data(initial.utf8), to: url, expect: .absent, origin: .app)
+            noteWritten(url)
+            rescan()
+            return NoteFilename.parse(url: url.standardizedFileURL, modifiedAt: Date())
+                ?? Note(path: url.standardizedFileURL, date: Date(), title: effective, modifiedAt: Date())
+        } catch {
+            lastError = "Could not create note: \(error.localizedDescription)"
+            return nil
         }
     }
 
@@ -236,166 +384,29 @@ final class VaultStore: ObservableObject {
         let key = path.standardizedFileURL.path
         lastOpenedAt[key] = Date()
         Self.persistLastOpened(lastOpenedAt)
-        notes = Self.sortedNotes(notes, inbound: syncInboundPaths, lastOpened: lastOpenedAt)
+        notes = Self.sortedNotes(notes, lastOpened: lastOpenedAt)
     }
 
-    /// Moves a note into the vault `Trash/` folder so the next sync propagates the delete.
+    /// Moves a note to `.stickies-trash/` (kept 30 days). The next sync moves the Mac's copy
+    /// to the Trash, unless the Mac edited it meanwhile.
     func moveNoteToTrash(_ note: Note) {
-        guard let root = rootURL else { return }
+        guard let writer, let hash = NoteWriter.currentHash(of: note.path) else {
+            lastError = "Could not move to Trash: the file can’t be read."
+            return
+        }
         do {
-            _ = try NoteFrontmatter.moveToTrash(file: note.path, roots: [root])
+            try writer.trash(note.path, expectHash: hash, origin: .app)
             rescan()
         } catch {
             lastError = "Could not move to Trash: \(error.localizedDescription)"
         }
     }
 
-    func syncNow() async {
-        guard let root = rootURL else {
-            lastError = "Pick a folder before syncing."
-            return
-        }
-        lastError = nil
-        syncBanner = SyncFeedback.progress(
-            title: "Syncing",
-            message: "Looking for peer…",
-            startedAt: Date(),
-            timeoutSeconds: 20,
-            debugCode: "sync:looking"
-        )
-        do {
-            _ = try await syncService.syncWithPeer()
-        } catch {
-            let message = LanSyncService.friendlyNetworkError(error)
-            let feedback = SyncFeedback(
-                kind: .failure,
-                title: "Sync failed",
-                message: message,
-                statusLine: "Sync failed — \(message)",
-                detail: String(describing: error),
-                debugCode: "sync:transport-error",
-                receivedCount: 0,
-                sentConfirmedCount: 0,
-                sentExpectedCount: 0
-            )
-            syncBanner = feedback
-            syncService.setStatus(feedback.statusLine)
-            SyncDebugLog.appendExchange(
-                directory: root,
-                deviceName: syncService.deviceName,
-                role: .client,
-                feedback: feedback,
-                result: nil
-            )
-        }
-    }
-
-    func dismissSyncBanner() {
-        if syncBanner?.debugCode == "sync:await-mac-merge" {
-            // Sync Later — cancel merge session on Mac too; leave note bodies unchanged.
-            syncBanner = nil
-            syncService.notifyPeerCancelMerge()
-            return
-        }
-        let shouldNotifyPeer = syncBanner?.kind == .success
-        syncBanner = nil
-        if shouldNotifyPeer {
-            syncService.notifyPeerDismissBanner()
-        }
-    }
-
-    /// User opened a note — drop the “received” badge (they’ve seen the new content).
-    func acknowledgeInbound(for path: URL) {
-        let key = path.standardizedFileURL.path
-        guard syncInboundPaths.contains(key) else { return }
-        syncInboundPaths.remove(key)
-    }
-
-    private func presentSyncResult(_ result: SyncExchangeResult, role: SyncExchangeRole) {
-        guard let root = rootURL else { return }
-        let localPaths = SyncCatalogBuilder.pathIndex(roots: [root])
-        syncOutboundPaths = Set(
-            result.peerAppliedIDs.compactMap { localPaths[$0]?.standardizedFileURL.path }
-        )
-
-        let feedback = SyncFeedback.from(
-            result: result,
-            role: role,
-            peerName: result.peerDeviceName
-        )
-        syncBanner = feedback
-        syncService.setStatus(feedback.statusLine)
-        if feedback.kind == .success
-            || feedback.debugCode == "sync:conflicts"
-            || feedback.debugCode == "sync:await-mac-merge"
-        {
-            lastError = nil
-        }
-
-        SyncDebugLog.appendExchange(
-            directory: root,
-            deviceName: syncService.deviceName,
-            role: role,
-            feedback: feedback,
-            result: result
-        )
-        rescan()
-    }
-
-    @discardableResult
-    private func applyRemoteCatalog(
-        _ remote: [SyncNotePayload],
-        peerLabel: String?
-    ) -> SyncApplyAck {
-        guard let root = rootURL else {
-            return SyncApplyAck(errorDescription: "No folder")
-        }
-        do {
-            let result = try SyncCatalogBuilder.applyRemoteCatalog(
-                remote,
-                roots: [root],
-                createDirectory: root,
-                peerLabel: peerLabel ?? "Mac",
-                conflictRole: .satellite
-            )
-
-            // Replace marks from this exchange only — blues not re-sent disappear.
-            syncInboundPaths = Set(result.appliedPaths.map { $0.standardizedFileURL.path })
-            let receivedAt = Date()
-            for path in result.appliedPaths {
-                lastOpenedAt[path.standardizedFileURL.path] = receivedAt
-            }
-            if !result.appliedPaths.isEmpty {
-                Self.persistLastOpened(lastOpenedAt)
-            }
-            rescan()
-            return SyncApplyAck(
-                appliedIDs: result.appliedIDs,
-                conflicts: result.conflicts,
-                awaitingAuthorityMerge: result.awaitingAuthorityMerge
-            )
-        } catch {
-            lastError = "Could not apply sync: \(error.localizedDescription)"
-            return SyncApplyAck(errorDescription: error.localizedDescription)
-        }
-    }
-
     /// Recent opens first; never-opened notes fall back to file modification date.
-    /// Inbound sync notes are open-touched so they float to the top.
-    private static func sortedNotes(
-        _ notes: [Note],
-        inbound: Set<String>,
-        lastOpened: [String: Date]
-    ) -> [Note] {
+    private static func sortedNotes(_ notes: [Note], lastOpened: [String: Date]) -> [Note] {
         notes.sorted { lhs, rhs in
-            let leftKey = lhs.path.standardizedFileURL.path
-            let rightKey = rhs.path.standardizedFileURL.path
-            let leftInbound = inbound.contains(leftKey)
-            let rightInbound = inbound.contains(rightKey)
-            if leftInbound != rightInbound { return leftInbound && !rightInbound }
-
-            let leftOpened = lastOpened[leftKey]
-            let rightOpened = lastOpened[rightKey]
+            let leftOpened = lastOpened[lhs.path.standardizedFileURL.path]
+            let rightOpened = lastOpened[rhs.path.standardizedFileURL.path]
             switch (leftOpened, rightOpened) {
             case let (l?, r?):
                 if l != r { return l > r }
@@ -441,21 +452,36 @@ final class VaultStore: ObservableObject {
                 return
             }
             isAccessing = true
-            rootURL = url.standardizedFileURL
-            if isStale {
-                if let refreshed = try? url.bookmarkData(
-                    options: .minimalBookmark,
-                    includingResourceValuesForKeys: nil,
-                    relativeTo: nil
-                ) {
-                    UserDefaults.standard.set(refreshed, forKey: bookmarkKey)
-                }
+            if isStale,
+               let refreshed = try? url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil) {
+                UserDefaults.standard.set(refreshed, forKey: bookmarkKey)
             }
-            rescan()
-            refreshSyncAdvertising()
+            activate(url.standardizedFileURL)
         } catch {
             lastError = "Saved folder is no longer available. Pick it again."
             UserDefaults.standard.removeObject(forKey: bookmarkKey)
+        }
+    }
+}
+
+extension MarkdownStickiesCore.NoteColor {
+    /// Same fills as the Mac stickies.
+    var swiftUIColor: Color {
+        switch self {
+        case .preset(.yellow): return Color(red: 1.0, green: 0.95, blue: 0.6)
+        case .preset(.blue): return Color(red: 0.72, green: 0.88, blue: 1.0)
+        case .preset(.green): return Color(red: 0.75, green: 0.95, blue: 0.75)
+        case .preset(.pink): return Color(red: 1.0, green: 0.8, blue: 0.85)
+        case .preset(.purple): return Color(red: 0.88, green: 0.8, blue: 0.95)
+        case .preset(.gray): return Color(red: 0.9, green: 0.9, blue: 0.9)
+        case .custom(let hex):
+            let digits = hex.dropFirst()
+            guard digits.count == 6, let value = Int(digits, radix: 16) else { return .yellow }
+            return Color(
+                red: Double((value >> 16) & 0xFF) / 255,
+                green: Double((value >> 8) & 0xFF) / 255,
+                blue: Double(value & 0xFF) / 255
+            )
         }
     }
 }

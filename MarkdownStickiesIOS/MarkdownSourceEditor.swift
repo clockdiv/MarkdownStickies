@@ -7,6 +7,7 @@ import UIKit
 struct MarkdownSourceEditor: UIViewRepresentable {
     @Binding var text: String
     var noteDirectory: URL
+    var isEditable: Bool = true
     var onOpenURL: (URL) -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -26,7 +27,7 @@ struct MarkdownSourceEditor: UIViewRepresentable {
         tv.smartDashesType = .no
         tv.smartQuotesType = .no
         tv.dataDetectorTypes = []
-        tv.isEditable = true
+        tv.isEditable = isEditable
         tv.isSelectable = true
         applyTypography(to: tv)
         context.coordinator.applyText(text, to: tv, preserveSelection: false)
@@ -35,6 +36,7 @@ struct MarkdownSourceEditor: UIViewRepresentable {
 
     func updateUIView(_ uiView: UITextView, context: Context) {
         context.coordinator.parent = self
+        uiView.isEditable = isEditable
         applyTypography(to: uiView)
         if uiView.text != text {
             context.coordinator.applyText(text, to: uiView, preserveSelection: true)
@@ -128,7 +130,7 @@ struct MarkdownSourceEditor: UIViewRepresentable {
                 if dest.hasPrefix("<"), dest.hasSuffix(">") {
                     dest = String(dest.dropFirst().dropLast())
                 }
-                guard let url = SyncImageAssets.resolveImageURL(dest, noteDirectory: parent.noteDirectory) else {
+                guard let url = ImageReferences.fileURL(forDestination: dest, noteDirectory: parent.noteDirectory) else {
                     return
                 }
                 attributed.addAttribute(.link, value: url, range: match.range)

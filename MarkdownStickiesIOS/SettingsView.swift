@@ -43,7 +43,7 @@ struct SettingsView: View {
             } header: {
                 Text("Notes Folder")
             } footer: {
-                Text("Markdown Stickies reads .md files in this folder and its subfolders. Access stays on this device.")
+                Text("Choose a folder “On My iPhone”. New notes start at its top level; the next sync with the Mac places them in a folder.")
             }
 
             Section {
@@ -52,12 +52,12 @@ struct SettingsView: View {
             } header: {
                 Text("This Device")
             } footer: {
-                Text("Used for created_on on new notes. iOS hides the personal device name unless you set it here.")
+                Text("Shown on the Mac during syncs and used for created_on on new notes. iOS hides the personal device name unless you set it here.")
             }
 
-            if let status = vault.syncService.lastStatus {
-                Section("Sync") {
-                    Text(status)
+            if let warning = vault.folderWarning {
+                Section("Notes Folder Location") {
+                    Text(warning)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

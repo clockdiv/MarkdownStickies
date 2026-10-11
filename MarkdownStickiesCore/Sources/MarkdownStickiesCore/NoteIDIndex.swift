@@ -6,6 +6,8 @@ public final class NoteIDIndex: @unchecked Sendable {
     public struct Entry: Equatable, Sendable {
         public var id: UUID?
         public var color: NoteColor?
+        /// Set on conflict copies (`stickies-conflict-of`).
+        public var conflictOf: UUID?
     }
 
     private struct Cached {
@@ -31,7 +33,11 @@ public final class NoteIDIndex: @unchecked Sendable {
         lock.unlock()
 
         let data = (try? Data(contentsOf: url)) ?? Data()
-        let entry = Entry(id: StickiesFrontmatter.id(in: data), color: StickiesFrontmatter.color(in: data))
+        let entry = Entry(
+            id: StickiesFrontmatter.id(in: data),
+            color: StickiesFrontmatter.color(in: data),
+            conflictOf: StickiesFrontmatter.conflictOf(in: data)
+        )
         lock.lock()
         cache[key] = Cached(modified: values?.contentModificationDate, size: values?.fileSize, entry: entry)
         lock.unlock()

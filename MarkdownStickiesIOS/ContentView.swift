@@ -25,6 +25,7 @@ struct ContentView: View {
     @State private var panes: [NotePane] = [.overview()]
     @State private var selectedPaneID = UUID()
     @State private var didSeedSelection = false
+    @State private var showFolderWarning = false
 
     var body: some View {
         Group {
@@ -57,6 +58,7 @@ struct ContentView: View {
                 if let url = urls.first {
                     vault.setFolder(url)
                     resetPanes()
+                    showFolderWarning = vault.folderWarning != nil
                 }
             case .failure(let error):
                 vault.lastError = error.localizedDescription
@@ -68,11 +70,18 @@ struct ContentView: View {
             }
         }
         .overlay {
-            if let banner = vault.syncBanner {
-                SyncBannerOverlay(feedback: banner) {
-                    vault.dismissSyncBanner()
-                }
+            if vault.sync.state != .idle {
+                SyncBannerOverlay(
+                    state: vault.sync.state,
+                    onCancel: { vault.cancelSync() },
+                    onDismiss: { vault.dismissSyncResult() }
+                )
             }
+        }
+        .alert("Folder in iCloud Drive", isPresented: $showFolderWarning) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(vault.folderWarning ?? "")
         }
         .alert("New Note", isPresented: $showingNewNote) {
             TextField("Title", text: $newNoteTitle)
@@ -152,14 +161,6 @@ struct ContentView: View {
                 trailing: { overviewTrailingButtons }
             )
             noteList(paneID: paneID)
-            if let status = vault.syncService.lastStatus {
-                Text(status)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
-                    .background(.bar)
-            }
         }
         .background(Color(.systemBackground))
     }
@@ -169,12 +170,12 @@ struct ContentView: View {
         HStack(spacing: 16) {
             if vault.rootURL != nil {
                 Button {
-                    Task { await vault.syncNow() }
+                    vault.syncNow()
                 } label: {
                     Image(systemName: "arrow.triangle.2.circlepath")
                 }
-                .disabled(vault.syncService.isSyncing)
-                .accessibilityLabel("Sync")
+                .disabled(vault.sync.state.isBusy)
+                .accessibilityLabel("Sync with Mac")
 
                 Button {
                     newNoteTitle = "Untitled"
@@ -242,6 +243,10 @@ struct ContentView: View {
                             openNote(note, in: paneID)
                         } label: {
                             HStack(alignment: .center, spacing: 8) {
+                                Circle()
+                                    .fill(vault.color(of: note)?.swiftUIColor ?? Color.clear)
+                                    .overlay(Circle().stroke(Color.secondary.opacity(0.3), lineWidth: 0.5))
+                                    .frame(width: 10, height: 10)
                                 VStack(alignment: .leading, spacing: 2) {
                                     HStack(spacing: 6) {
                                         Text(note.title)
@@ -258,16 +263,13 @@ struct ContentView: View {
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                         .lineLimit(1)
+                                    if let label = statusLabel(for: note) {
+                                        Text(label)
+                                            .font(.caption2.weight(.medium))
+                                            .foregroundStyle(.orange)
+                                    }
                                 }
                                 Spacer(minLength: 0)
-                                if vault.syncInboundPaths.contains(note.path.standardizedFileURL.path) {
-                                    SyncDirectionBadge(direction: .received)
-                                        .accessibilityLabel("Received from peer")
-                                }
-                                if vault.syncOutboundPaths.contains(note.path.standardizedFileURL.path) {
-                                    SyncDirectionBadge(direction: .sent)
-                                        .accessibilityLabel("Sent to peer")
-                                }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .contentShape(Rectangle())
@@ -279,6 +281,15 @@ struct ContentView: View {
         }
         .listStyle(.plain)
         .refreshable { vault.rescan() }
+    }
+
+    private func statusLabel(for note: Note) -> String? {
+        switch vault.status(of: note) {
+        case .synced: return nil
+        case .inbox: return "New — placed in a folder at the next sync"
+        case .conflictCopy: return "Conflict copy — merge on the Mac"
+        case .notSynced: return "Not synced"
+        }
     }
 
     private func subtitle(for note: Note) -> String {
@@ -394,31 +405,11 @@ struct ContentView: View {
     }
 
     private func createNote() {
-        guard let root = vault.rootURL else { return }
-        let title = newNoteTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        let effective = title.isEmpty ? "Untitled" : title
-        let url = NoteFilename.uniqueURL(in: root, date: Date(), title: effective)
-        let initial = NoteFrontmatter.initialDocument(
-            title: effective,
-            createdOn: vault.deviceDisplayName
-        )
-        do {
-            try initial.write(to: url, atomically: true, encoding: .utf8)
-            let note = NoteFilename.parse(url: url.standardizedFileURL, modifiedAt: Date())
-                ?? Note(
-                    path: url.standardizedFileURL,
-                    date: Date(),
-                    title: effective,
-                    modifiedAt: Date()
-                )
-            vault.rescan()
-            let targetID = panes.first(where: { $0.id == selectedPaneID })?.id
-                ?? panes.first(where: { $0.showsOverview })?.id
-                ?? selectedPaneID
-            openNote(note, in: targetID)
-        } catch {
-            vault.lastError = "Could not create note: \(error.localizedDescription)"
-        }
+        guard let note = vault.createNote(title: newNoteTitle) else { return }
+        let targetID = panes.first(where: { $0.id == selectedPaneID })?.id
+            ?? panes.first(where: { $0.showsOverview })?.id
+            ?? selectedPaneID
+        openNote(note, in: targetID)
     }
 }
 
@@ -442,40 +433,5 @@ struct PaneChrome<Leading: View, Trailing: View>: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .background(.bar)
-    }
-}
-
-/// Compact sync direction chip: green ↓ received, blue → sent.
-private struct SyncDirectionBadge: View {
-    enum Direction {
-        case received
-        case sent
-    }
-
-    let direction: Direction
-
-    private var fill: Color {
-        switch direction {
-        case .received: return .green
-        case .sent: return .blue
-        }
-    }
-
-    private var arrow: String {
-        switch direction {
-        case .received: return "arrow.down"
-        case .sent: return "arrow.right"
-        }
-    }
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .fill(fill)
-            Image(systemName: arrow)
-                .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(.white)
-        }
-        .frame(width: 16, height: 16)
     }
 }
