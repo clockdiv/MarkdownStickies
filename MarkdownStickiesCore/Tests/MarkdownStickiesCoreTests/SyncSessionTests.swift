@@ -193,6 +193,11 @@ final class SyncSessionTests: XCTestCase {
             in: dir.appendingPathComponent("state"), deviceID: phoneID, vaultID: try VaultScanner.loadOrCreateInfo(vault: vault, storage: dir.appendingPathComponent("ios-storage")).vaultID
         ))
         XCTAssertEqual(store.conflictBase(for: copyID).map { String(decoding: $0, as: UTF8.self) }, note(a, "base"))
+        XCTAssertEqual(run.macSummary?.conflicts, [SyncConflictRecord(copyID: copyID, originalID: a)])
+        XCTAssertEqual(
+            SyncStateStore.conflictBase(for: copyID, stateRoot: dir.appendingPathComponent("state")).map { String(decoding: $0, as: UTF8.self) },
+            note(a, "base")
+        )
 
         let again = await sync()
         XCTAssertEqual(again.macSummary?.changedNothing, true, "the conflict doesn't come back")

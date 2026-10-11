@@ -90,9 +90,13 @@ final class NoteStore: ObservableObject {
         let index = idIndex
         stateStore.resolveID = { index.entry(for: $0).id }
         windowManager.attach(noteStore: self)
-        sync.onFinished = { [weak self] _ in
-            self?.rescan(restoreWindows: false)
-            self?.windowManager.reloadInlineImages()
+        sync.onFinished = { [weak self] outcome in
+            guard let self else { return }
+            self.rescan(restoreWindows: false)
+            self.windowManager.reloadInlineImages()
+            if case .completed(let summary) = outcome, !summary.conflicts.isEmpty {
+                self.queueMerges(for: summary.conflicts)
+            }
         }
 
         scanConfig.objectWillChange
@@ -239,6 +243,8 @@ final class NoteStore: ObservableObject {
     // MARK: - Conflict copies and merge
 
     @Published var mergeRequest: MergeRequest?
+    /// Conflicts from the last sync, merged one after another.
+    private var pendingMerges: [MergeRequest] = []
     /// Filled at each rescan: paths of conflict copies, and ids that have a conflict copy.
     @Published private(set) var conflictCopyPaths: Set<String> = []
     /// `stickies-color` per note path, read from the files (the frontmatter is the only source).
@@ -269,14 +275,54 @@ final class NoteStore: ObservableObject {
     func requestMerge(copy: Note) {
         Task { @MainActor in
             await windowManager.saveAllOpenAndWait()
-            guard let original = originalNote(ofConflictCopy: copy),
-                  let originalData = try? Data(contentsOf: original.path),
-                  let copyData = try? Data(contentsOf: copy.path)
-            else {
+            guard let request = makeMergeRequest(copy: copy) else {
                 lastError = "The original of “\(copy.title)” wasn’t found. Edit or delete the copy by hand."
                 return
             }
-            mergeRequest = MergeRequest(original: original, copy: copy, originalData: originalData, copyData: copyData)
+            mergeRequest = request
+        }
+    }
+
+    /// After a sync that made conflict copies: open the merge view for each, one after another.
+    private func queueMerges(for conflicts: [SyncConflictRecord]) {
+        let requests = conflicts.compactMap { conflict -> MergeRequest? in
+            guard let copy = notes.first(where: { idIndex.entry(for: $0.path).id == conflict.copyID }) else { return nil }
+            return makeMergeRequest(copy: copy)
+        }
+        guard !requests.isEmpty else { return }
+        pendingMerges += requests
+        AppDelegate.showControlWindow()   // the merge view is a sheet on the notes window
+        if mergeRequest == nil { showNextMerge() }
+    }
+
+    private func makeMergeRequest(copy: Note) -> MergeRequest? {
+        guard let copyID = idIndex.entry(for: copy.path).id,
+              let original = originalNote(ofConflictCopy: copy),
+              let originalData = try? Data(contentsOf: original.path),
+              let copyData = try? Data(contentsOf: copy.path)
+        else { return nil }
+        return MergeRequest(
+            original: original,
+            copy: copy,
+            originalData: originalData,
+            copyData: copyData,
+            baseData: SyncStateStore.conflictBase(for: copyID, stateRoot: Self.supportDirectory)
+        )
+    }
+
+    /// "Later" or after saving: the copy stays (or is gone); go on with the next conflict.
+    func finishMerge() {
+        mergeRequest = nil
+        DispatchQueue.main.async { [weak self] in self?.showNextMerge() }
+    }
+
+    private func showNextMerge() {
+        while !pendingMerges.isEmpty {
+            let next = pendingMerges.removeFirst()
+            if FileManager.default.fileExists(atPath: next.copy.path.path) {
+                mergeRequest = next
+                return
+            }
         }
     }
 
@@ -307,8 +353,8 @@ final class NoteStore: ObservableObject {
         } catch {
             lastError = "The merge was saved, but the copy couldn’t be moved to the Trash: \(error.localizedDescription)"
         }
-        mergeRequest = nil
         rescan(restoreWindows: false)
+        finishMerge()
         return nil
     }
 

@@ -70,6 +70,21 @@ public struct SyncStateStore: Sendable {
         try? FileManager.default.removeItem(at: conflictBaseURL(copyID))
     }
 
+    /// The merge base of a conflict copy, from whichever device's state holds it.
+    public static func conflictBase(for copyID: UUID, stateRoot: URL) -> Data? {
+        let fm = FileManager.default
+        let syncState = stateRoot.appendingPathComponent("SyncState", isDirectory: true)
+        for device in (try? fm.contentsOfDirectory(atPath: syncState.path)) ?? [] {
+            let deviceDir = syncState.appendingPathComponent(device, isDirectory: true)
+            for vault in (try? fm.contentsOfDirectory(atPath: deviceDir.path)) ?? [] {
+                let url = deviceDir.appendingPathComponent(vault)
+                    .appendingPathComponent("conflict-base/\(copyID.uuidString).md")
+                if let data = try? Data(contentsOf: url) { return data }
+            }
+        }
+        return nil
+    }
+
     /// Removes conflict snapshots whose copy no longer exists.
     public func pruneConflictBases(keeping copyIDs: Set<UUID>) {
         let folder = directory.appendingPathComponent("conflict-base", isDirectory: true)

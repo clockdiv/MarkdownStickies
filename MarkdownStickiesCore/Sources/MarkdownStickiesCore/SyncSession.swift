@@ -289,6 +289,7 @@ private struct MacRun {
                 try writer.write(copy, to: try noteURL(at), expect: .absent, origin: .sync)
                 macLocations[id] = at
                 try? store.snapshotConflictBase(copy: id, original: original)
+                summary.conflicts.append(SyncConflictRecord(copyID: id, originalID: original))
 
             case .moveNote(let id, let from, let to, let hash):
                 try writer.move(from: try noteURL(from), to: try noteURL(to), expectHash: hash, origin: .sync)

@@ -117,6 +117,8 @@ public struct SyncSummary: Codable, Sendable, Equatable {
     public var conflictCopies: Int
     public var skipped: [SyncSkip]
     public var failedSteps: [SyncFailedStep]
+    /// Conflict copies this sync created (the Mac opens the merge view for them).
+    public var conflicts: [SyncConflictRecord]
 
     public init(peerName: String, isFirstSync: Bool) {
         self.peerName = peerName
@@ -128,11 +130,17 @@ public struct SyncSummary: Codable, Sendable, Equatable {
         conflictCopies = 0
         skipped = []
         failedSteps = []
+        conflicts = []
     }
 
     public var changedNothing: Bool {
         updated + created + moved + trashed + conflictCopies == 0
     }
+}
+
+public struct SyncConflictRecord: Codable, Hashable, Sendable {
+    public var copyID: UUID
+    public var originalID: UUID
 }
 
 public enum SyncOutcome: Sendable, Equatable {

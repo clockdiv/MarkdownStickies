@@ -910,3 +910,8 @@ References are to `docs/rewrite-spec-review.md`.
 ### Revision 3.2 (2026-10-11): no hidden files in the iOS vault
 
 - Testing showed that "On My iPhone" folders refuse names starting with a dot. The vault info moved to app storage, the iOS trash is the visible `Stickies Trash` folder, and temp files have visible names.
+
+### Revision 3.3 (2026-10-11): real merge, opened automatically
+
+- The three-way merge moves from "later" into Core v1 (user decision after testing). After a sync that made conflict copies, the Mac opens the merge view for each, one after another.
+- The merge is a line-based three-way merge against the stored base (`conflict-base/`), as in git: one-sided changes are taken automatically, lines changed on both devices are marked as conflicts. Every changed line has + (keep) and − (drop) and the color of its device; removed lines are struck through and can be restored. The result can still be edited by hand. Without a stored base, every difference is shown as a conflict.

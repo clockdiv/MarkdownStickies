@@ -33,7 +33,7 @@ struct ControlWindowView: View {
             MergeView(
                 request: request,
                 onSave: { store.saveMerge(request, body: $0) },
-                onCancel: { store.mergeRequest = nil }
+                onCancel: { store.finishMerge() }
             )
         }
         .overlay {
