@@ -882,11 +882,13 @@ private struct NoteListRow: View {
         let shape = RoundedRectangle(cornerRadius: 2.5, style: .continuous)
         if let noteColor {
             let swatch = Color(nsColor: noteColor.listSwatchNSColor)
-            shape.fill(swatch)
-                .overlay {
-                    if isOpen { shape.strokeBorder(Color.primary.opacity(0.55), lineWidth: 1.5) }
-                }
-                .help(isOpen ? "Open" : "Color")
+            if isOpen {
+                shape.fill(swatch)
+                    .help("Open")
+            } else {
+                shape.strokeBorder(swatch, lineWidth: 1.75)
+                    .help("Saved color")
+            }
         } else {
             Color.clear
         }
