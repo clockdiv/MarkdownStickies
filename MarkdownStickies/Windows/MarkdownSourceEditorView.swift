@@ -144,7 +144,7 @@ final class MarkdownSourceEditorView: NSView, NSTextViewDelegate, StickyNoteEdit
 
     func updateNoteURL(_ url: URL) { noteURL = url }
 
-    func reloadPreviewMedia() {
+    func reloadInlineImages() {
         let plain = serializeMarkdown()
         let caret = primaryTextView()?.selectedRange().location
         let plainOffset = caret.map { plainOffset(forAttributedLocation: $0) }

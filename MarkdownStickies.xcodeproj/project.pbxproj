@@ -21,8 +21,6 @@
 		A10000000000000000000022 /* SyncBannerOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000022 /* SyncBannerOverlay.swift */; };
 		A10000000000000000000010 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000010 /* Assets.xcassets */; };
 		A10000000000000000000016 /* NoteImageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000016 /* NoteImageStore.swift */; };
-		A10000000000000000000017 /* MarkdownBlockParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000017 /* MarkdownBlockParser.swift */; };
-		A10000000000000000000018 /* MarkdownHTMLRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000018 /* MarkdownHTMLRenderer.swift */; };
 		A1000000000000000000001C /* StickyTitlebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000001C /* StickyTitlebarView.swift */; };
 		A1000000000000000000001D /* StickyPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000001D /* StickyPanel.swift */; };
 		A10000000000000000000028 /* NoteHoverPreviewPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000028 /* NoteHoverPreviewPanel.swift */; };
@@ -58,8 +56,6 @@
 		B10000000000000000000010 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B10000000000000000000011 /* MarkdownStickies.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = MarkdownStickies.entitlements; sourceTree = "<group>"; };
 		B10000000000000000000016 /* NoteImageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoteImageStore.swift; sourceTree = "<group>"; };
-		B10000000000000000000017 /* MarkdownBlockParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownBlockParser.swift; sourceTree = "<group>"; };
-		B10000000000000000000018 /* MarkdownHTMLRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownHTMLRenderer.swift; sourceTree = "<group>"; };
 		B1000000000000000000001C /* StickyTitlebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StickyTitlebarView.swift; sourceTree = "<group>"; };
 		B1000000000000000000001D /* StickyPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StickyPanel.swift; sourceTree = "<group>"; };
 		B10000000000000000000028 /* NoteHoverPreviewPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoteHoverPreviewPanel.swift; sourceTree = "<group>"; };
@@ -150,8 +146,6 @@
 				B1000000000000000000000A /* FolderWatcher.swift */,
 				B1000000000000000000000B /* NoteStore.swift */,
 				B10000000000000000000016 /* NoteImageStore.swift */,
-				B10000000000000000000017 /* MarkdownBlockParser.swift */,
-				B10000000000000000000018 /* MarkdownHTMLRenderer.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -317,8 +311,6 @@
 				A1000000000000000000000F /* ControlWindowView.swift in Sources */,
 				A10000000000000000000022 /* SyncBannerOverlay.swift in Sources */,
 				A10000000000000000000016 /* NoteImageStore.swift in Sources */,
-				A10000000000000000000017 /* MarkdownBlockParser.swift in Sources */,
-				A10000000000000000000018 /* MarkdownHTMLRenderer.swift in Sources */,
 				A10000000000000000000025 /* StickyNoteEditorBody.swift in Sources */,
 				A10000000000000000000026 /* MarkdownSourceEditorView.swift in Sources */,
 				A10000000000000000000027 /* MarkdownTableEditorController.swift in Sources */,

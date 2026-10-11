@@ -1,6 +1,6 @@
 import Foundation
 
-/// Simple line-based diff for conflict review (not a full Myers implementation).
+/// Line-based diff (LCS) for the merge view.
 public enum TextDiff {
     public enum Line: Equatable, Sendable {
         case same(String)
@@ -29,21 +29,6 @@ public enum TextDiff {
             }
         }
         return reversed.reversed()
-    }
-
-    /// Prefill for merge editor — git-style markers when bodies differ.
-    public static func conflictMarkedBody(local: String, remote: String, peerLabel: String) -> String {
-        if local == remote { return local }
-        let peer = peerLabel.trimmingCharacters(in: .whitespacesAndNewlines)
-        let label = peer.isEmpty ? "peer" : peer
-        return """
-        <<<<<<< Local
-        \(local.trimmingCharacters(in: CharacterSet(charactersIn: "\n")))
-        =======
-        \(remote.trimmingCharacters(in: CharacterSet(charactersIn: "\n")))
-        >>>>>>> \(label)
-
-        """
     }
 
     private static func lcsTable(_ a: [String], _ b: [String]) -> [[Int]] {

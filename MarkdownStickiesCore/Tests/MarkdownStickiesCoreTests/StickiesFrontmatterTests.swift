@@ -334,3 +334,40 @@ final class ConflictCopyTests: XCTestCase {
         )
     }
 }
+
+final class NoteFrontmatterTests: XCTestCase {
+    func testSplitUsesStrictBlockRule() {
+        let doc = "---\nstickies-id: X\n---\n\n# Note\n"
+        XCTAssertEqual(NoteFrontmatter.splitDocument(doc).prefix, "---\nstickies-id: X\n---\n")
+        XCTAssertEqual(NoteFrontmatter.splitDocument(doc).body, "\n# Note\n")
+
+        let rule = "---\nJust text\n---\n"
+        XCTAssertEqual(NoteFrontmatter.splitDocument(rule).prefix, "")
+        XCTAssertEqual(NoteFrontmatter.splitDocument("\n---\na: 1\n---\n").prefix, "")
+    }
+
+    func testInitialDocumentCarriesStickiesID() {
+        let id = UUID()
+        let doc = NoteFrontmatter.initialDocument(title: "Idea", id: id, createdOn: "Mac")
+        XCTAssertEqual(StickiesFrontmatter.id(in: Data(doc.utf8)), id)
+        XCTAssertEqual(doc, "---\nstickies-id: \(id.uuidString)\ncreated_on: Mac\n---\n\n# Idea\n")
+    }
+
+    func testLegacyTrashOnlyDirectlyUnderARoot() {
+        let root = URL(fileURLWithPath: "/notes/project")
+        XCTAssertTrue(NoteFrontmatter.isLegacyTrash(file: URL(fileURLWithPath: "/notes/project/Trash/a.md"), roots: [root]))
+        XCTAssertFalse(NoteFrontmatter.isLegacyTrash(file: URL(fileURLWithPath: "/notes/project/docs/Trash/a.md"), roots: [root]))
+        XCTAssertFalse(NoteFrontmatter.isLegacyTrash(file: URL(fileURLWithPath: "/notes/project/Trashcan.md"), roots: [root]))
+    }
+}
+
+final class ImageReferencesFileURLTests: XCTestCase {
+    func testEditorResolving() {
+        let dir = URL(fileURLWithPath: "/notes/docs")
+        XCTAssertEqual(ImageReferences.fileURL(forDestination: "img/a%20b.png", noteDirectory: dir)?.path, "/notes/docs/img/a b.png")
+        XCTAssertEqual(ImageReferences.fileURL(forDestination: "../a.png", noteDirectory: dir)?.path, "/notes/a.png")
+        XCTAssertEqual(ImageReferences.fileURL(forDestination: "https://x.org/a.png", noteDirectory: dir)?.absoluteString, "https://x.org/a.png")
+        XCTAssertNil(ImageReferences.fileURL(forDestination: "notes.md", noteDirectory: dir))
+        XCTAssertNil(ImageReferences.fileURL(forDestination: "/abs/a.png", noteDirectory: dir))
+    }
+}

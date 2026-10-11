@@ -720,7 +720,7 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
         }
     }
 
-    /// Hide for set-switch without destroying the editor (keeps TextKit/WebKit warm).
+    /// Hide for set-switch without destroying the editor (keeps the TextKit editor warm).
     func hibernate() {
         detachColorPanelIfNeeded()
         content.flushPendingPublish()
@@ -850,7 +850,7 @@ final class StickyWindowController: NSObject, NSWindowDelegate {
 
     /// Soft refresh so newly synced images appear without changing text.
     func reloadInlineImages() {
-        content.reloadPreviewMedia()
+        content.reloadInlineImages()
     }
 
     private func markTypingActivity() {

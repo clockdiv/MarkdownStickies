@@ -11,7 +11,7 @@ protocol StickyNoteEditorBody: AnyObject {
     var hasUnpublishedEdits: Bool { get }
 
     func updateNoteURL(_ url: URL)
-    func reloadPreviewMedia()
+    func reloadInlineImages()
     func applyBackground(_ color: NSColor)
     func applyFontSize(_ size: Double)
     func applyColumnCount(_ count: Int)

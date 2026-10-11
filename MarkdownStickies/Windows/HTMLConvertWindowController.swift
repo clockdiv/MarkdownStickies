@@ -1,8 +1,8 @@
 import AppKit
 import MarkdownStickiesCore
-import WebKit
 
-/// Checklist of HTML tags + live sticky-style preview of the converted Markdown.
+/// Checklist of HTML tags + live preview of the converted Markdown, shown in the same
+/// native editor a sticky uses (read-only). No HTML is rendered.
 @MainActor
 final class HTMLConvertWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
     private let sourceHTML: String
@@ -15,7 +15,7 @@ final class HTMLConvertWindowController: NSWindowController, NSTableViewDataSour
     private var tags: [HTMLToMarkdown.TagInfo]
     private var enabled: Set<String>
     private var tableView: NSTableView!
-    private var previewWebView: WKWebView!
+    private var previewEditor: MarkdownSourceEditorView!
     private var previewContainer: NSView!
     private var statusLabel: NSTextField!
 
@@ -238,16 +238,17 @@ final class HTMLConvertWindowController: NSWindowController, NSTableViewDataSour
         sticky.translatesAutoresizingMaskIntoConstraints = false
         self.previewContainer = sticky
 
-        let config = WKWebViewConfiguration()
-        config.defaultWebpagePreferences.allowsContentJavaScript = false
-        let web = WKWebView(frame: .zero, configuration: config)
-        web.setValue(false, forKey: "drawsBackground")
-        if #available(macOS 12.0, *) {
-            web.underPageBackgroundColor = background
-        }
+        let web = MarkdownSourceEditorView(
+            noteURL: noteURL,
+            text: "",
+            background: background,
+            fontSize: fontSize,
+            columnCount: 1
+        )
+        web.isReadOnly = true
         web.translatesAutoresizingMaskIntoConstraints = false
         sticky.addSubview(web)
-        self.previewWebView = web
+        self.previewEditor = web
 
         pane.addSubview(headline)
         pane.addSubview(sticky)
@@ -283,17 +284,7 @@ final class HTMLConvertWindowController: NSWindowController, NSTableViewDataSour
         }
         statusLabel.stringValue = info
 
-        let blocks = MarkdownBlockParser.parse(result.markdown)
-        let html = MarkdownHTMLRenderer.document(
-            blocks: blocks,
-            activeIndex: nil,
-            backgroundHex: background.reliableHexString,
-            noteDirectory: noteURL.deletingLastPathComponent(),
-            fontSize: fontSize,
-            columnCount: 1
-        )
-        let base = noteURL.deletingLastPathComponent()
-        previewWebView.loadHTMLString(html, baseURL: base)
+        previewEditor.markdown = result.markdown
     }
 
     // MARK: - Actions
