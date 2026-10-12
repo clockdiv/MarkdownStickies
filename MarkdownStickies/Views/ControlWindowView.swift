@@ -201,7 +201,8 @@ struct ControlWindowView: View {
                         isOpen: isOpen,
                         isActive: activePath == note.path.path,
                         noteColor: noteColor,
-                        previewColor: fileColor ?? .default,
+                        // Notes without stickies-color yet: the color they'll get on first open.
+                        previewColor: fileColor ?? store.stateStore.storedState(for: note.path)?.legacyColor ?? .default,
                         onOpen: { store.openNote(note) }
                     )
                     .contextMenu {
